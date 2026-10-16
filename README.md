@@ -11,9 +11,39 @@ parts, and gives agents the tools to keep it current: order emails in, sales
 out, a Google Sheet as the human-facing view, and a review queue for anything
 the plugin could not verify.
 
-**Status: scaffolding.** The tool surface is declared and registered; the
-handlers arrive over phases 2–6. Calling one today returns the phase it is
-waiting on.
+**Status: the ledger works.** `record_receipt`, `record_adjustment` and
+`get_stock` are implemented against the schema in `migrations/`. The other
+eight tools are declared and registered but arrive over phases 3–6; calling
+one today returns the phase it is waiting on.
+
+## The ledger
+
+Everything the business believes about stock is a sum over `ledger_entries`,
+which is why the table's rules are in the schema rather than in TypeScript:
+
+- **Append-only, enforced.** Triggers refuse `UPDATE`, `DELETE` and
+  `TRUNCATE`. A mistake is corrected by recording an adjustment, so the
+  mistake and the correction are both visible.
+- **Three quantities, tracked separately.** Each entry says how much it moves
+  *on order* and how much it moves *on hand*, and a `CHECK` constraint makes
+  those agree with the entry's type — a "sale" cannot add stock. *Committed*
+  is not a movement at all, so it lives in `reservations`. `part_stock` is the
+  one view that defines all three.
+- **Idempotent.** An entry may carry a key, unique in the database, so
+  reprocessing an order email or re-running a sheet sync cannot double-count.
+  Reusing a key with a *different* quantity is refused rather than merged.
+- **Provenance is not optional.** Every entry records who wrote it, in which
+  run, and from which tool, in a `NOT NULL` column with a constraint that an
+  empty object does not satisfy. It comes from the host's run context, so an
+  agent cannot claim to be someone else.
+- **On hand never goes negative without an explicit adjustment.** Checked
+  under a row lock on the part, so two writers cannot both decide that the
+  last five units are theirs. Adjustments are the spec's named exception: if
+  a physical count says the ledger is wrong, the ledger is wrong.
+
+Migrations are applied lazily on the first tool call that needs them. The host
+only migrates plugins that use `ctx.db`, and this one owns its connection —
+see `docs/sdk-notes.md` (c).
 
 ## How it fits together
 

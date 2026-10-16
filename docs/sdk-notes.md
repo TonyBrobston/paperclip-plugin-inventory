@@ -255,3 +255,14 @@ that deployment-specific values come from config. It also keeps a generic
   on it.
 - **`dist/` is committed** so an install needs no build step, and CI fails if it
   is stale. Rebuild before committing.
+- **`migrations/` has to be found relative to the built worker.** Phase 2
+  resolves it from `import.meta.url`, which works because `src/` and `dist/`
+  both sit one level under the package root. A bundler change that rewrote
+  `import.meta.url` would break it and nothing else, so `src/storage.ts`
+  reports a missing directory distinctly from a failed connection, and
+  `npm run smoke` fails if the built worker reports the former.
+- **PostgreSQL `text` cannot hold a NUL byte.** It rejects the whole statement
+  with an encoding error that names neither the column nor anything an
+  operator can act on. Phase 2 found this with a `\u0000` delimiter inside an
+  idempotency key; keys are JSON-encoded now, and free text from tool
+  parameters is screened for control characters before it reaches a column.

@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
+import { SCHEMA_NAME_PATTERN } from "./constants.js";
 
 export interface DatabaseHandle {
   pool: Pool;
@@ -51,9 +52,14 @@ function fingerprintOf(connectionString: string, schema: string): string {
  * `parseDatabaseSchema` has already restricted the name to unquoted-safe
  * characters; this is the second half of the same rule, kept next to the only
  * place that interpolates.
+ *
+ * It imports the pattern rather than restating it. A copy would agree with
+ * the original right up until someone widened one of them, and the symptom —
+ * a settings form that saves green and a worker that throws on every query —
+ * would appear nowhere near the change. Raised in phase 1 review and QA.
  */
 export function quoteIdentifier(name: string): string {
-  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(name)) {
+  if (!new RegExp(SCHEMA_NAME_PATTERN).test(name)) {
     throw new Error(`Refusing to interpolate unsafe identifier: ${name}`);
   }
   return `"${name}"`;

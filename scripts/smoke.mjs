@@ -161,6 +161,18 @@ try {
     fail("the built manifest declares no tools");
   }
 
+  /**
+   * Tools with a handler, as of phase 2. Repeated here rather than imported
+   * because `dist/worker.js` starts a worker the moment it is loaded;
+   * `tests/worker.spec.ts` asserts this list still matches `dispatch`.
+   *
+   * The host above hands them a connection string pointing at a closed port,
+   * which is the interesting case for a smoke test: the three implemented
+   * tools must come back with something an operator can act on, through the
+   * real bundle, rather than taking the worker down with them.
+   */
+  const IMPLEMENTED = new Set(["record_receipt", "record_adjustment", "get_stock"]);
+
   for (const tool of manifest.tools) {
     const result = await send("executeTool", {
       toolName: tool.name,
@@ -168,19 +180,41 @@ try {
       runContext,
     });
 
-    // Every handler lands over phases 2-6. Until then the honest answer is
-    // which phase it is waiting on — and that answer has to survive the trip
-    // to the agent like any other result.
+    // Whatever the answer is, it has to survive the trip to the agent.
     const forwarded = assertForwardable(tool.name, result);
-    if (!/phase \d/.test(result?.error ?? "")) {
-      fail(`${tool.name} did not say which phase it is waiting on: ${JSON.stringify(result)}`);
+
+    // The remaining handlers land over phases 3-6. Until then the honest
+    // answer is which phase the tool is waiting on.
+    const expected = IMPLEMENTED.has(tool.name)
+      ? /could not be (opened|brought up to date)|is required|not a part reference/
+      : /phase \d/;
+
+    for (const [label, text] of [
+      ["error", result?.error ?? ""],
+      ["the agent's text block", forwarded.content[0].text],
+      ["structuredContent", JSON.stringify(forwarded.structuredContent)],
+    ]) {
+      if (!expected.test(text)) {
+        fail(`${tool.name} said nothing useful in ${label}: ${JSON.stringify(result)}`);
+      }
     }
-    if (!/phase \d/.test(forwarded.content[0].text)) {
-      fail(`${tool.name}'s message never reached the agent's text block`);
+
+    // A failure that leaks the connection string is worse than no failure
+    // message at all, and this is the only place the real bundle is exercised
+    // against a connection it cannot make.
+    const everything = `${result?.error} ${forwarded.content[0].text} ${JSON.stringify(forwarded.structuredContent)}`;
+    if (/smoke:smoke|127\.0\.0\.1:1\b/.test(everything)) {
+      fail(`${tool.name} quoted the connection string back to the agent`);
     }
-    if (!/phase \d/.test(JSON.stringify(forwarded.structuredContent))) {
-      fail(`${tool.name}'s message never reached structuredContent`);
+
+    // The bundle has to find `migrations/` relative to dist/worker.js, which
+    // only the built artifact can prove: the unit suite imports src/, and a
+    // bundler that rewrote import.meta.url would break this and nothing else.
+    // Reaching the connection attempt at all means the files were read.
+    if (/missing its migrations directory/.test(everything)) {
+      fail(`${tool.name} could not find migrations/ next to the built worker`);
     }
+
     console.log(`${tool.name}: ${result.error}`);
   }
 
