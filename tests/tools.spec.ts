@@ -79,6 +79,9 @@ describe("tool declarations", () => {
     expect(required("submit_order_email")).toContain("agentExtraction");
     // Idempotency keys. Without them a retry double-counts.
     expect(required("record_receipt")).toContain("reference");
+    // `delivery` refines that key rather than replacing it, so a split
+    // delivery is representable without a second order number.
+    expect(required("record_receipt")).not.toContain("delivery");
     expect(required("record_sale")).toContain("reference");
     // An adjustment is the one entry with no document behind it.
     expect(required("record_adjustment")).toContain("reason");

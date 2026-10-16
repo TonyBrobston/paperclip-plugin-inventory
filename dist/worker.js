@@ -42477,26 +42477,18 @@ async function appendEntry(db, input2) {
   if (reference === "") {
     throw new InputError("A reference is required: it is what makes this entry traceable.");
   }
+  let attemptedKey;
   const write2 = async () => db.transaction(async (client) => {
-    if (input2.idempotencyKey) {
-      const existing = await findByIdempotencyKey(client, input2.idempotencyKey);
-      if (existing) {
-        return {
-          entry: existing,
-          part: await partOf(client, existing.partId),
-          duplicate: true,
-          stock: await readStockFor(client, existing.partId)
-        };
-      }
-    }
     const part = await resolvePart(client, input2.part, {
       create: input2.createMissingPart === true,
       description: input2.description,
       unitOfMeasure: input2.unitOfMeasure
     });
+    const key = input2.idempotencyScope ? idempotencyKey(...input2.idempotencyScope, part.partId, reference) : void 0;
+    attemptedKey = key;
     await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [part.partId]);
-    if (input2.idempotencyKey) {
-      const existing = await findByIdempotencyKey(client, input2.idempotencyKey);
+    if (key) {
+      const existing = await findByIdempotencyKey(client, key);
       if (existing) {
         return {
           entry: existing,
@@ -42530,7 +42522,7 @@ async function appendEntry(db, input2) {
         deltas.onOrderDelta,
         input2.unitCost ?? null,
         reference,
-        input2.idempotencyKey ?? null,
+        key ?? null,
         input2.note ?? null,
         JSON.stringify(input2.provenance),
         input2.createdBy
@@ -42546,9 +42538,10 @@ async function appendEntry(db, input2) {
   try {
     return await write2();
   } catch (error62) {
-    if (input2.idempotencyKey && error62?.code === UNIQUE_VIOLATION) {
+    if (attemptedKey && error62?.code === UNIQUE_VIOLATION) {
+      const key = attemptedKey;
       const existing = await db.transaction(async (client) => {
-        const entry = await findByIdempotencyKey(client, input2.idempotencyKey);
+        const entry = await findByIdempotencyKey(client, key);
         if (!entry) return void 0;
         return {
           entry,
@@ -42808,23 +42801,27 @@ async function recordReceipt(ctx, rawParams, runCtx) {
   const part = parsePartRef(input2.partId);
   const quantity = parseQuantity(input2.quantity, { label: "Quantity", positive: true });
   const reference = requiredText(input2.reference, "A reference");
+  const delivery = optionalText(input2.delivery, "The delivery");
   const note = optionalText(input2.note, "The note");
   const db = await openStore(ctx, runCtx.companyId);
-  const key = idempotencyKey("receipt", part.kind === "id" ? part.id : part.ref, reference);
   const result = await appendEntry(db, {
     part,
     entryType: "receipt",
     quantity,
     reference,
-    idempotencyKey: key,
+    idempotencyScope: delivery ? ["receipt", delivery] : ["receipt"],
     note,
     createMissingPart: part.kind === "vendor",
-    provenance: provenanceOf("record_receipt", runCtx, { reference }),
+    provenance: provenanceOf("record_receipt", runCtx, {
+      reference,
+      ...delivery ? { delivery } : {}
+    }),
     createdBy: runCtx.agentId
   });
   if (result.duplicate && result.entry.quantityDelta !== quantity) {
+    const which = delivery ? `Delivery "${delivery}" against reference "${reference}"` : `Reference "${reference}"`;
     throw new InputError(
-      `Reference "${reference}" was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity}. Nothing was changed. Use a different reference for a second delivery, or record an adjustment if the first one was wrong.`
+      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`
     );
   }
   return entryResult("record_receipt", result, "receipt");
@@ -42846,7 +42843,7 @@ async function recordAdjustment(ctx, rawParams, runCtx) {
     // An adjustment with no external document still needs something
     // traceable in the column, and the reason is what there is.
     reference: reference ?? `adjustment: ${reason}`.slice(0, MAX_TEXT),
-    idempotencyKey: reference ? idempotencyKey("adjustment", part.kind === "id" ? part.id : part.ref, reference) : void 0,
+    idempotencyScope: reference ? ["adjustment"] : void 0,
     note: reason,
     createMissingPart: part.kind === "vendor",
     provenance: provenanceOf("record_adjustment", runCtx, {
@@ -42881,12 +42878,13 @@ async function getStock(ctx, rawParams, runCtx) {
       data: { parts: [], count: 0, matched: false }
     };
   }
+  const matched = part ? { matched: true } : {};
   const content = part ? stockSummary(rows[0]) : rows.length === 0 ? "No parts yet. Nothing has been received or adjusted." : `${rows.length} part${rows.length === 1 ? "" : "s"}:
 ${rows.map(stockSummary).join("\n")}`;
   return {
     content,
     data: {
-      matched: true,
+      ...matched,
       count: rows.length,
       parts: rows.map((row) => ({
         partId: row.partId,
@@ -42989,6 +42987,10 @@ var TOOL_DECLARATIONS = [
         reference: {
           type: "string",
           description: "What this receipt relates to, such as a vendor order number. Reused references are treated as the same receipt."
+        },
+        delivery: {
+          type: "string",
+          description: "Which shipment this is, such as a packing-slip number. Only needed when one order arrives in more than one box: it makes the second shipment a separate receipt that still draws down the same order's on-order quantity. Omit it and the reference identifies the receipt on its own."
         },
         note: { type: "string" }
       },

@@ -15,7 +15,7 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendEntry, idempotencyKey, readEntries, readStock, type Provenance } from "../src/ledger.js";
+import { appendEntry, readEntries, readStock, type Provenance } from "../src/ledger.js";
 import { InputError, LedgerError } from "../src/errors.js";
 import { parsePartRef, type PartRef } from "../src/parts.js";
 import { quoteIdentifier } from "../src/db.js";
@@ -46,13 +46,13 @@ integration("the ledger", () => {
     await closeAll();
   });
 
-  const receipt = (quantity: number, reference: string, key?: string) =>
+  const receipt = (quantity: number, reference: string, scope?: readonly string[]) =>
     appendEntry(t.db, {
       part,
       entryType: "receipt",
       quantity,
       reference,
-      idempotencyKey: key ?? idempotencyKey("receipt", part.ref, reference),
+      idempotencyScope: scope ?? ["receipt"],
       provenance: PROVENANCE,
       createdBy: AGENT,
       createMissingPart: true,
@@ -64,7 +64,7 @@ integration("the ledger", () => {
       entryType: "purchase",
       quantity,
       reference,
-      idempotencyKey: idempotencyKey("purchase", part.ref, reference),
+      idempotencyScope: ["purchase"],
       provenance: PROVENANCE,
       createdBy: AGENT,
       createMissingPart: true,
@@ -76,18 +76,18 @@ integration("the ledger", () => {
       entryType: "sale",
       quantity,
       reference,
-      idempotencyKey: idempotencyKey("sale", part.ref, reference),
+      idempotencyScope: ["sale"],
       provenance: PROVENANCE,
       createdBy: AGENT,
     });
 
-  const adjustment = (quantityDelta: number, reference: string, key?: string) =>
+  const adjustment = (quantityDelta: number, reference: string, scope?: readonly string[]) =>
     appendEntry(t.db, {
       part,
       entryType: "adjustment",
       quantity: quantityDelta,
       reference,
-      idempotencyKey: key,
+      idempotencyScope: scope,
       note: "physical count",
       provenance: PROVENANCE,
       createdBy: AGENT,
@@ -178,6 +178,25 @@ integration("the ledger", () => {
       expect(await stockOf()).toMatchObject({ onOrder: 0, onHand: 7 });
     });
 
+    it("clears the order when it arrives in two shipments", async () => {
+      // Each shipment is its own event — a different delivery, so a different
+      // key — but both discharge the same order. Were the second one forced
+      // onto a new reference instead, it would discharge nothing and this
+      // fully delivered order would sit at 6 on order forever.
+      await purchase(10, "PO-1");
+      await receipt(4, "PO-1", ["receipt", "slip-1"]);
+      expect(await stockOf()).toMatchObject({ onOrder: 6, onHand: 4 });
+      await receipt(6, "PO-1", ["receipt", "slip-2"]);
+      expect(await stockOf()).toMatchObject({ onOrder: 0, onHand: 10 });
+    });
+
+    it("does not let an extra shipment drive on order below zero", async () => {
+      await purchase(10, "PO-1");
+      await receipt(10, "PO-1", ["receipt", "slip-1"]);
+      await receipt(3, "PO-1", ["receipt", "slip-2"]);
+      expect(await stockOf()).toMatchObject({ onOrder: 0, onHand: 13 });
+    });
+
     it("a receipt against a different reference leaves the first order outstanding", async () => {
       await purchase(10, "PO-1");
       await receipt(10, "PO-2");
@@ -250,11 +269,73 @@ integration("the ledger", () => {
     });
 
     it("a referenced adjustment is applied once however often the sync runs", async () => {
-      const key = idempotencyKey("adjustment", part.ref, "sheet-row-12");
-      await adjustment(2, "sheet-row-12", key);
-      const again = await adjustment(2, "sheet-row-12", key);
+      await adjustment(2, "sheet-row-12", ["adjustment"]);
+      const again = await adjustment(2, "sheet-row-12", ["adjustment"]);
       expect(again.duplicate).toBe(true);
       expect(await stockOf()).toMatchObject({ onHand: 2 });
+    });
+
+    it("recognises the retry whatever the caller spelled the part number as", async () => {
+      // The key names the resolved part, not the caller's spelling of it.
+      // `parts` matches case-insensitively, so if the key did not, a retry
+      // that shouted the part number would find no row for its key, resolve
+      // to the same part, and append a second receipt — doubling stock by
+      // doing the one thing the key exists to absorb.
+      const first = await receipt(5, "PO-1");
+      const shouted = await appendEntry(t.db, {
+        part: parsePartRef("vendor-a:PART-001"),
+        entryType: "receipt",
+        quantity: 5,
+        reference: "PO-1",
+        idempotencyScope: ["receipt"],
+        provenance: PROVENANCE,
+        createdBy: AGENT,
+        createMissingPart: true,
+      });
+
+      expect(shouted.duplicate).toBe(true);
+      expect(shouted.entry.id).toBe(first.entry.id);
+      expect(await stockOf()).toMatchObject({ onHand: 5 });
+      expect(await readEntries(t.db, first.part.partId)).toHaveLength(1);
+    });
+
+    it("recognises the retry when it addresses the part by its internal id", async () => {
+      // Same defect one scope wider: a caller that read the part id back from
+      // a previous result and retried with it must not get a second entry.
+      const first = await receipt(5, "PO-1");
+      const byId = await appendEntry(t.db, {
+        part: parsePartRef(first.part.partId),
+        entryType: "receipt",
+        quantity: 5,
+        reference: "PO-1",
+        idempotencyScope: ["receipt"],
+        provenance: PROVENANCE,
+        createdBy: AGENT,
+      });
+
+      expect(byId.duplicate).toBe(true);
+      expect(byId.entry.id).toBe(first.entry.id);
+      expect(await stockOf()).toMatchObject({ onHand: 5 });
+    });
+
+    it("keeps one part's events from colliding with another's", async () => {
+      // The key carries the part, so the same scope and reference on a
+      // different part is a different event.
+      await receipt(5, "PO-1");
+      await appendEntry(t.db, {
+        part: parsePartRef("vendor-a:part-002"),
+        entryType: "receipt",
+        quantity: 3,
+        reference: "PO-1",
+        idempotencyScope: ["receipt"],
+        provenance: PROVENANCE,
+        createdBy: AGENT,
+        createMissingPart: true,
+      });
+      expect(await stockOf()).toMatchObject({ onHand: 5 });
+      expect((await readStock(t.db, parsePartRef("vendor-a:part-002")))[0]).toMatchObject({
+        onHand: 3,
+      });
     });
 
     it("refuses a second entry under the same key, in the database itself", async () => {

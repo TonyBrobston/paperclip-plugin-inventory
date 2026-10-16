@@ -8,9 +8,11 @@
  *
  *   - **Append-only.** Nothing here updates or deletes a ledger row, and
  *     `0002_ledger.sql` has triggers that refuse it even if something tried.
- *   - **Idempotent.** A caller that repeats an event with the same key gets
- *     the original entry back, not a second one. The guarantee is a unique
- *     index, so two callers racing cannot both win.
+ *   - **Idempotent.** A caller that repeats an event gets the original entry
+ *     back, not a second one. The guarantee is a unique index, so two callers
+ *     racing cannot both win, and the key is built here from the *resolved*
+ *     part, so a retry that spells the part number differently is still the
+ *     same event.
  *   - **Atomic.** The part, the entry and the balance check are one
  *     transaction. There is no state in which the part exists and the receipt
  *     that created it does not.
@@ -62,8 +64,19 @@ export interface AppendEntryInput {
   /** Always positive; the entry type decides the direction. */
   quantity: number;
   reference: string;
-  /** Repeating this key is the same event, not a second one. Omit for "always new". */
-  idempotencyKey?: string;
+  /**
+   * The caller's half of the idempotency key — what kind of event this is,
+   * plus anything that distinguishes two of them against one reference.
+   * Repeating it is the same event, not a second one; omit it for "always
+   * new".
+   *
+   * Only the caller's half, because the other half — the part and the
+   * reference — is added here, from the *resolved* part. A caller cannot
+   * build a key from the spelling it was given: `vendor-a:PART-001` and
+   * `vendor-a:part-001` are one part, and a key that disagreed would let a
+   * retry append a second entry and double the count.
+   */
+  idempotencyScope?: readonly string[];
   unitCost?: number;
   note?: string;
   /** Required. An entry nobody can trace is an entry nobody can check. */
@@ -260,6 +273,15 @@ async function resolvePart(
  * stock that arrives with no purchase behind it (an opening balance, a free
  * sample) has nothing to discharge, so on-order stays where it was instead of
  * going negative.
+ *
+ * Deliberately keyed on the reference alone, and not on whatever made this
+ * particular receipt a distinct event. An order delivered in two shipments is
+ * two receipts against one PO, and both of them have to draw down that PO's
+ * outstanding quantity — otherwise the second shipment lands on hand while
+ * on-order stays overstated forever, for an order that is fully delivered.
+ * `record_receipt`'s `delivery` parameter is the other half of this decision:
+ * it makes the second shipment a separate event without making it a separate
+ * order.
  */
 async function outstandingOnOrder(
   client: PoolClient,
@@ -350,38 +372,37 @@ export async function appendEntry(
     throw new InputError("A reference is required: it is what makes this entry traceable.");
   }
 
+  // Set inside the transaction, read by the unique-violation recovery below,
+  // which needs the key the failed attempt used and cannot rebuild it without
+  // resolving the part again.
+  let attemptedKey: string | undefined;
+
   const write = async (): Promise<AppendEntryResult> =>
     db.transaction(async (client) => {
-      // Checked before anything is written, so a repeat costs one read and
-      // touches nothing.
-      if (input.idempotencyKey) {
-        const existing = await findByIdempotencyKey(client, input.idempotencyKey);
-        if (existing) {
-          return {
-            entry: existing,
-            part: await partOf(client, existing.partId),
-            duplicate: true,
-            stock: await readStockFor(client, existing.partId),
-          };
-        }
-      }
-
       const part = await resolvePart(client, input.part, {
         create: input.createMissingPart === true,
         description: input.description,
         unitOfMeasure: input.unitOfMeasure,
       });
 
+      // Built here rather than by the caller, so every spelling of one part —
+      // uppercase, lowercase, or the internal id — produces the same key and
+      // a retry is recognised as the retry it is.
+      const key = input.idempotencyScope
+        ? idempotencyKey(...input.idempotencyScope, part.partId, reference)
+        : undefined;
+      attemptedKey = key;
+
       // Serialises concurrent writers for this part, which is what makes the
       // balance check below a decision and not a guess. Two sales racing for
       // the last unit queue here; the second sees the first's entry.
       await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [part.partId]);
 
-      // Re-checked inside the lock. The first look happened before the lock
-      // was held, so a concurrent writer could have inserted the same key in
-      // between.
-      if (input.idempotencyKey) {
-        const existing = await findByIdempotencyKey(client, input.idempotencyKey);
+      // Under the lock, so the answer cannot change between the look and the
+      // insert: a concurrent writer with the same key is either already
+      // committed and found here, or still waiting on the lock above.
+      if (key) {
+        const existing = await findByIdempotencyKey(client, key);
         if (existing) {
           return {
             entry: existing,
@@ -425,7 +446,7 @@ export async function appendEntry(
           deltas.onOrderDelta,
           input.unitCost ?? null,
           reference,
-          input.idempotencyKey ?? null,
+          key ?? null,
           input.note ?? null,
           JSON.stringify(input.provenance),
           input.createdBy,
@@ -447,9 +468,10 @@ export async function appendEntry(
     // interleaving the lock cannot cover: two writers whose first entry for a
     // brand-new part races before either holds the row. The loser's
     // transaction is already dead, so the answer has to come from a fresh one.
-    if (input.idempotencyKey && (error as { code?: string })?.code === UNIQUE_VIOLATION) {
+    if (attemptedKey && (error as { code?: string })?.code === UNIQUE_VIOLATION) {
+      const key = attemptedKey;
       const existing = await db.transaction(async (client) => {
-        const entry = await findByIdempotencyKey(client, input.idempotencyKey!);
+        const entry = await findByIdempotencyKey(client, key);
         if (!entry) return undefined;
         return {
           entry,

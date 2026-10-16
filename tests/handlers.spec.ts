@@ -92,14 +92,53 @@ integration("the phase 2 tools", () => {
       expect(again.content).toMatch(/already recorded/i);
     });
 
+    it("treats a retry that spells the part number differently as the same receipt", async () => {
+      // Parts match case-insensitively, so these are one part — and the retry
+      // is one receipt. If the key disagreed with the lookup, this would be
+      // 10 on hand from a single delivery, written by a retry.
+      await receipt({});
+      const shouted = await receipt({ partId: "vendor-a:PART-001" });
+      expect(shouted.data).toMatchObject({ duplicate: true, stock: { onHand: 5 } });
+      expect((await exec(t, "SELECT count(*)::int AS n FROM ledger_entries"))[0]!.n).toBe(1);
+    });
+
+    it("treats a retry addressed by internal part id as the same receipt", async () => {
+      const first = await receipt({});
+      const byId = await receipt({ partId: (first.data!.partId as string) });
+      expect(byId.data).toMatchObject({ duplicate: true, stock: { onHand: 5 } });
+      expect((await exec(t, "SELECT count(*)::int AS n FROM ledger_entries"))[0]!.n).toBe(1);
+    });
+
     it("refuses a reused reference with a different quantity rather than picking one", async () => {
-      // Either a typo or a second delivery against the same order. Merging
+      // Either a typo or a second shipment against the same order. Merging
       // them silently would lose a number somebody meant.
       await receipt({});
       const conflict = await receipt({ quantity: 7 });
       expect(conflict.error).toMatch(/already used to receive 5/);
+      expect(conflict.error).toMatch(/pass its packing slip as "delivery"/);
       const stock = await call("get_stock", { partId: "vendor-a:part-001" });
       expect(stock.data).toMatchObject({ parts: [{ onHand: 5 }] });
+    });
+
+    it("takes a second shipment against one order without losing the order", async () => {
+      // The path the error above points at. Both shipments are receipts
+      // against PO-1, so both draw down what PO-1 put on order.
+      await receipt({ quantity: 4, delivery: "slip-1" });
+      await receipt({ quantity: 6, delivery: "slip-2" });
+      const stock = await call("get_stock", { partId: "vendor-a:part-001" });
+      expect(stock.data).toMatchObject({ parts: [{ onHand: 10 }] });
+    });
+
+    it("still absorbs a retry of one shipment", async () => {
+      await receipt({ quantity: 4, delivery: "slip-1" });
+      const again = await receipt({ quantity: 4, delivery: "slip-1" });
+      expect(again.data).toMatchObject({ duplicate: true, stock: { onHand: 4 } });
+    });
+
+    it("names the shipment when that is what the quantity disagrees about", async () => {
+      await receipt({ quantity: 4, delivery: "slip-1" });
+      const conflict = await receipt({ quantity: 9, delivery: "slip-1" });
+      expect(conflict.error).toMatch(/Delivery "slip-1" against reference "PO-1"/);
     });
 
     it("keeps separate references separate", async () => {
@@ -184,6 +223,13 @@ integration("the phase 2 tools", () => {
       expect(again.data).toMatchObject({ duplicate: true, stock: { onHand: -2 } });
     });
 
+    it("applies it once even when the sync spells the part number differently", async () => {
+      // A sheet row re-read with the vendor's own casing is the same row.
+      await adjust({ reference: "sheet-row-12" });
+      const again = await adjust({ partId: "vendor-a:PART-001", reference: "sheet-row-12" });
+      expect(again.data).toMatchObject({ duplicate: true, stock: { onHand: -2 } });
+    });
+
     it("treats an unreferenced adjustment as a new event each time", async () => {
       // Two physical counts of the same part are two events. Collapsing them
       // would silently throw one away.
@@ -244,6 +290,20 @@ integration("the phase 2 tools", () => {
       const result = await call("get_stock", {});
       expect(result.data).toMatchObject({ count: 0 });
       expect(result.content).toMatch(/No parts yet/);
+    });
+
+    it("answers whether the part matched only when a part was named", async () => {
+      // `matched: true` over an empty inventory would read as if the flag
+      // were about the query, and would say the same thing as "we have never
+      // heard of this part" — which is a different answer.
+      await receipt({});
+      expect((await call("get_stock", {})).data).not.toHaveProperty("matched");
+      expect((await call("get_stock", { partId: "vendor-a:part-001" })).data).toMatchObject({
+        matched: true,
+      });
+      expect((await call("get_stock", { partId: "vendor-z:part-999" })).data).toMatchObject({
+        matched: false,
+      });
     });
 
     it("never reads a stored total", async () => {

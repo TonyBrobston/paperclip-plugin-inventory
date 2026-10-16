@@ -16,7 +16,6 @@ import type { PluginContext, ToolResult, ToolRunContext } from "@paperclipai/plu
 import { InputError } from "./errors.js";
 import {
   appendEntry,
-  idempotencyKey,
   readStock,
   type AppendEntryResult,
   type Provenance,
@@ -120,11 +119,18 @@ function entryResult(tool: string, result: AppendEntryResult, verb: string): Too
 /**
  * Record that ordered parts physically arrived.
  *
- * Idempotent on (part, reference): "reused references are treated as the same
- * receipt", as the tool's own description promises. A reused reference with a
- * *different* quantity is refused rather than merged — it is either a typo or
- * a second delivery against the same order, and both deserve a human deciding
- * which, not a silently discarded number.
+ * Idempotent on (part, reference, delivery): "reused references are treated as
+ * the same receipt", as the tool's own description promises. A reused
+ * reference with a *different* quantity is refused rather than merged — it is
+ * either a typo or a second shipment against the same order, and both deserve
+ * a human deciding which, not a silently discarded number.
+ *
+ * `delivery` is how the second shipment says so. One order arriving in two
+ * boxes is two receipts against one reference, and keying the second on its
+ * packing slip is what lets it both exist and still discharge what that order
+ * left on order — see `outstandingOnOrder`. Telling the operator to invent a
+ * second reference instead would clear nothing: on-order would sit at the
+ * undelivered remainder of an order that is, in fact, complete.
  */
 export async function recordReceipt(
   ctx: PluginContext,
@@ -135,26 +141,32 @@ export async function recordReceipt(
   const part = parsePartRef(input.partId);
   const quantity = parseQuantity(input.quantity, { label: "Quantity", positive: true });
   const reference = requiredText(input.reference, "A reference");
+  const delivery = optionalText(input.delivery, "The delivery");
   const note = optionalText(input.note, "The note");
 
   const db = await openStore(ctx, runCtx.companyId);
-  const key = idempotencyKey("receipt", part.kind === "id" ? part.id : part.ref, reference);
 
   const result = await appendEntry(db, {
     part,
     entryType: "receipt",
     quantity,
     reference,
-    idempotencyKey: key,
+    idempotencyScope: delivery ? ["receipt", delivery] : ["receipt"],
     note,
     createMissingPart: part.kind === "vendor",
-    provenance: provenanceOf("record_receipt", runCtx, { reference }),
+    provenance: provenanceOf("record_receipt", runCtx, {
+      reference,
+      ...(delivery ? { delivery } : {}),
+    }),
     createdBy: runCtx.agentId,
   });
 
   if (result.duplicate && result.entry.quantityDelta !== quantity) {
+    const which = delivery
+      ? `Delivery "${delivery}" against reference "${reference}"`
+      : `Reference "${reference}"`;
     throw new InputError(
-      `Reference "${reference}" was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity}. Nothing was changed. Use a different reference for a second delivery, or record an adjustment if the first one was wrong.`,
+      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`,
     );
   }
 
@@ -195,9 +207,7 @@ export async function recordAdjustment(
     // An adjustment with no external document still needs something
     // traceable in the column, and the reason is what there is.
     reference: reference ?? `adjustment: ${reason}`.slice(0, MAX_TEXT),
-    idempotencyKey: reference
-      ? idempotencyKey("adjustment", part.kind === "id" ? part.id : part.ref, reference)
-      : undefined,
+    idempotencyScope: reference ? ["adjustment"] : undefined,
     note: reason,
     createMissingPart: part.kind === "vendor",
     provenance: provenanceOf("record_adjustment", runCtx, {
@@ -249,6 +259,13 @@ export async function getStock(
     };
   }
 
+  // `matched` answers "does the part you named exist", so it is only present
+  // when a part was named. An unfiltered call returning `matched: true` with
+  // nothing in it reads as if the flag were about the query, and leaves an
+  // agent unable to tell an empty inventory from a part we have never heard
+  // of — which are different answers.
+  const matched = part ? { matched: true } : {};
+
   const content = part
     ? stockSummary(rows[0]!)
     : rows.length === 0
@@ -258,7 +275,7 @@ export async function getStock(
   return {
     content,
     data: {
-      matched: true,
+      ...matched,
       count: rows.length,
       parts: rows.map((row) => ({
         partId: row.partId,

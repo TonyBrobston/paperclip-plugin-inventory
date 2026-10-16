@@ -32,6 +32,16 @@ which is why the table's rules are in the schema rather than in TypeScript:
 - **Idempotent.** An entry may carry a key, unique in the database, so
   reprocessing an order email or re-running a sheet sync cannot double-count.
   Reusing a key with a *different* quantity is refused rather than merged.
+  The key is built from the *resolved* part — never from the spelling the
+  caller used — because `vendor-a:PART-001`, `vendor-a:part-001` and the
+  part's internal id are one part, and a key that disagreed would let a retry
+  append a second entry and double the count.
+- **One order can arrive in two boxes.** A receipt is identified by its
+  reference *and* its `delivery` — a packing slip, say — while the on-order
+  quantity it discharges is still looked up by the reference alone. So a
+  second shipment against PO-1 is a new event that draws down what PO-1 left
+  outstanding. The alternative, telling the operator to invent a second
+  reference, would leave a fully delivered order permanently on order.
 - **Provenance is not optional.** Every entry records who wrote it, in which
   run, and from which tool, in a `NOT NULL` column with a constraint that an
   empty object does not satisfy. It comes from the host's run context, so an
