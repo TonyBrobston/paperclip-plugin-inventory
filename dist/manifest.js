@@ -120,6 +120,10 @@ var TOOL_DECLARATIONS = [
           type: "string",
           description: "What this receipt relates to, such as a vendor order number. Reused references are treated as the same receipt."
         },
+        delivery: {
+          type: "string",
+          description: "Which shipment this is, such as a packing-slip number. Only needed when one order arrives in more than one box: it makes the second shipment a separate receipt that still draws down the same order's on-order quantity. Omit it and the reference identifies the receipt on its own."
+        },
         note: { type: "string" }
       },
       required: ["partId", "quantity", "reference"]

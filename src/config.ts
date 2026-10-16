@@ -14,14 +14,10 @@ import {
   SUPPORTED_VENDORS,
   type SupportedVendor,
 } from "./constants.js";
+import { OperatorFacingError } from "./errors.js";
 
 /** A configuration problem an operator can fix, phrased for the operator. */
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConfigError";
-  }
-}
+export class ConfigError extends OperatorFacingError {}
 
 export interface InventorySettings {
   /** Unresolved. The value is fetched per call and never stored. */

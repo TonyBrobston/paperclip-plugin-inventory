@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import plugin, { structured } from "../src/worker.js";
+import plugin, { IMPLEMENTED_TOOLS, structured } from "../src/worker.js";
 import { TOOL_DECLARATIONS } from "../src/tools.js";
 import { CONFIG_KEYS } from "../src/constants.js";
 
@@ -47,6 +47,35 @@ describe("tool registration", () => {
     // A tool that is not built yet should read as "not built yet" rather than
     // as a crash, so an agent stops instead of retrying.
     expect(result.error).toContain("phase 3");
+  });
+
+  it("keeps IMPLEMENTED_TOOLS honest about which tools have a handler", async () => {
+    // Two things read that list — the readiness log and `scripts/smoke.mjs` —
+    // and both would quietly describe the wrong build if a later phase wired
+    // a handler without updating it. This config is empty, so an implemented
+    // tool fails on configuration and an unimplemented one names its phase;
+    // the difference is what makes the two distinguishable here.
+    for (const declaration of TOOL_DECLARATIONS) {
+      const result = await harness.executeTool<{ error?: string }>(
+        declaration.name,
+        {},
+        { companyId: COMPANY_ID },
+      );
+      const saysPhase = /is not implemented yet/.test(result.error ?? "");
+      const claimed = (IMPLEMENTED_TOOLS as readonly string[]).includes(declaration.name);
+      expect(saysPhase, `${declaration.name} is listed as implemented but is not`).toBe(!claimed);
+    }
+  });
+
+  it("lists every declared tool's phase as one still to come", () => {
+    // The flip side: a phase number left behind on a tool that now works.
+    for (const declaration of TOOL_DECLARATIONS) {
+      if ((IMPLEMENTED_TOOLS as readonly string[]).includes(declaration.name)) {
+        expect(declaration.phase, `${declaration.name} works, so its phase should be 2`).toBe(2);
+      } else {
+        expect(declaration.phase).toBeGreaterThan(2);
+      }
+    }
   });
 });
 

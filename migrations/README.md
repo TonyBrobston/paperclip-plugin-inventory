@@ -12,5 +12,32 @@ inside its own transaction together with the row that records it.
   configured schema for the duration of each migration, so `CREATE TABLE
   parts (...)` lands in the right place whatever the deployment named it.
 
-The ledger tables arrive in phase 2. This directory is empty until then, which
-the runner handles: nothing to apply is not an error.
+- **Keep them small and single-purpose.** One file per concern, so a failure
+  names the thing that failed.
+
+They are applied lazily, by the first tool call that needs the database —
+`src/storage.ts`. The host runs migrations only for plugins that use
+`ctx.db`, and this one owns its connection.
+
+| File | What it adds | Status |
+|---|---|---|
+| `0001_parts.sql` | `parts`, keyed by (vendor, vendor part number), matched case-insensitively | in use |
+| `0002_ledger.sql` | `ledger_entries`, its type/bucket constraint and the append-only triggers | in use |
+| `0003_orders.sql` | `orders` and `order_lines`, with the spec's (vendor, order number, line) and Gmail-message uniqueness | **provisional** |
+| `0004_reservations.sql` | `reservations` — committed stock, which is a promise rather than a movement | in use, via `part_stock.committed` |
+| `0005_review_queue.sql` | `review_queue`, one open item per message | **provisional** |
+| `0006_boms.sql` | `boms` and `bom_lines`, versioned so history is never rewritten | **provisional** |
+| `0007_sync_state.sql` | `sync_state`, one row per cursor | **provisional** |
+| `0008_part_stock.sql` | the `part_stock` view: the single definition of on hand, on order and committed | in use |
+
+Phases 3 to 6 fill in the tables they own. They exist now because the
+uniqueness rules in `SPEC.md` are properties of the schema, and retrofitting
+one around existing rows is harder than getting it right once.
+
+**What "provisional" means.** `0003`, `0005`, `0006` and `0007` are a first
+draft, not a settled design. No code path reads or writes them yet — only
+constraint tests do — so the phase that actually needs one of these tables is
+expected to find columns missing or shaped wrong, and should add a migration
+that changes it rather than treating the existing file as a decision already
+reviewed. Drop the marker from this table once a phase's code depends on the
+table and has exercised it.

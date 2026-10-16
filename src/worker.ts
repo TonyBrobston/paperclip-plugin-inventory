@@ -9,6 +9,8 @@ import {
 import { ConfigError, isSecretRefBinding, parseDatabaseSchema, parseEnabledVendors } from "./config.js";
 import { CONFIG_KEYS, DEFAULT_DATABASE_SCHEMA, SETTINGS_PATH } from "./constants.js";
 import { closeAllDatabases } from "./db.js";
+import { OperatorFacingError } from "./errors.js";
+import { getStock, recordAdjustment, recordReceipt } from "./handlers.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
 
 /**
@@ -18,12 +20,11 @@ import { TOOL_DECLARATIONS } from "./tools.js";
  * list is stable and a missing capability reads as "not built yet" rather than
  * as a tool that silently is not there.
  */
-export class NotImplementedError extends Error {
+export class NotImplementedError extends OperatorFacingError {
   constructor(toolName: string, phase: number) {
     super(
       `${toolName} is not implemented yet — it lands in phase ${phase} of the inventory plugin build.`,
     );
-    this.name = "NotImplementedError";
   }
 }
 
@@ -52,9 +53,10 @@ export function structured(data: unknown): Record<string, unknown> {
  *
  * Returning `{ error }` rather than throwing keeps the message useful: a
  * missing config should read as "an operator needs to set this", not as a
- * plugin crash. Only messages this plugin wrote are passed through — an
- * arbitrary runtime error can carry a connection string, a hostname or row
- * data in its text, and a tool result goes to an agent.
+ * plugin crash. Only messages this plugin wrote are passed through — that is
+ * what `OperatorFacingError` marks — because an arbitrary runtime error can
+ * carry a connection string, a hostname or row data in its text, and a tool
+ * result goes to an agent.
  *
  * `content` and `data` are set alongside `error` for the reason above: `error`
  * alone travels in neither field the host forwards, so the message would never
@@ -66,7 +68,7 @@ export function toolError(
   companyId: string,
   error: unknown,
 ): ToolResult {
-  const expected = error instanceof ConfigError || error instanceof NotImplementedError;
+  const expected = error instanceof OperatorFacingError;
   const message = expected ? error.message : "The inventory request failed.";
   ctx.logger.warn("Inventory tool call failed", {
     tool: toolName,
@@ -84,14 +86,35 @@ export function toolError(
  * The single seam every phase adds to. Keeping it here, rather than attaching
  * a handler to each declaration, is what lets `worker.ts` own the result
  * shape and the error policy for all eleven tools at once.
+ *
+ * Phase 2 fills in the three ledger tools. The other eight still answer with
+ * the phase that owns them.
  */
+/**
+ * Tools with a handler today.
+ *
+ * Exported so the tests can assert that this list and `dispatch` agree: a
+ * tool named here that still throws `NotImplementedError`, or one missing
+ * from it that works, means the two have drifted.
+ */
+export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock"] as const;
+
 export async function dispatch(
-  _ctx: PluginContext,
+  ctx: PluginContext,
   declaration: (typeof TOOL_DECLARATIONS)[number],
-  _params: unknown,
-  _runCtx: ToolRunContext,
+  params: unknown,
+  runCtx: ToolRunContext,
 ): Promise<ToolResult> {
-  throw new NotImplementedError(declaration.name, declaration.phase);
+  switch (declaration.name) {
+    case "record_receipt":
+      return recordReceipt(ctx, params, runCtx);
+    case "record_adjustment":
+      return recordAdjustment(ctx, params, runCtx);
+    case "get_stock":
+      return getStock(ctx, params, runCtx);
+    default:
+      throw new NotImplementedError(declaration.name, declaration.phase);
+  }
 }
 
 const plugin = definePlugin({
@@ -117,8 +140,9 @@ const plugin = definePlugin({
 
     ctx.logger.info("Inventory plugin ready", {
       tools: TOOL_DECLARATIONS.length,
-      // Honest about what this build is. The handlers arrive over phases 2-6.
-      implemented: 0,
+      // Honest about what this build is. The remaining handlers arrive over
+      // phases 3-6.
+      implemented: IMPLEMENTED_TOOLS.length,
     });
   },
 
