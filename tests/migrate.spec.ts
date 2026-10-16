@@ -104,6 +104,10 @@ integration("migrate (against a real PostgreSQL)", () => {
 
   afterEach(async () => {
     await db.pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schema)} CASCADE`);
+    // And the pool with it: a schema per test is a pool per test, and the
+    // connections they hold idle outlive the schema by thirty seconds. See
+    // `tests/support/database.ts`.
+    await closeAllDatabases();
     if (dir) await rm(dir, { recursive: true, force: true });
   });
 

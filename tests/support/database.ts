@@ -39,9 +39,28 @@ export async function freshSchema(): Promise<TestSchema> {
   return { db, schema, poolKey: schema };
 }
 
+/**
+ * Drop the schema, and close the pools that were opened against it.
+ *
+ * The pools have to go too. `getDatabase` caches one per key and holds its
+ * connections idle for thirty seconds, and a schema per test means a key per
+ * test — plus a second one in the handler suite, which opens its pool under a
+ * company id rather than the schema name. Left to expire on their own, a
+ * couple of hundred sockets pile up against a server whose default limit is
+ * a hundred, and the suite dies with "sorry, too many clients already" in
+ * whichever test happened to be running when the limit was reached, nowhere
+ * near the thing that caused it.
+ *
+ * A schema per test is deliberate — the append-only triggers refuse TRUNCATE.
+ * A *pool* per test is not.
+ */
 export async function dropSchema(target: TestSchema | undefined): Promise<void> {
   if (!target) return;
-  await target.db.pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(target.schema)} CASCADE`);
+  try {
+    await target.db.pool.query(`DROP SCHEMA IF EXISTS ${quoteIdentifier(target.schema)} CASCADE`);
+  } finally {
+    await closeAllDatabases();
+  }
 }
 
 export async function closeAll(): Promise<void> {
