@@ -1,0 +1,12 @@
+McMaster-Carr
+Order Number: SYNTH-MC-100
+Order Date: 2026-10-10
+Ship to: Sample Person
+123 Example Lane, Test City, ZZ 00000
+Part Number | Description | Quantity | Unit Price | Total
+SYNTH-MC-A | Synthetic fastener | 4 | $2.25 | $9.00
+SYNTH-MC-B | Synthetic washer | 2 | $0.50 | $1.00
+Subtotal: $10.00
+Shipping: $3.00
+Tax: $0.80
+Total: $13.80

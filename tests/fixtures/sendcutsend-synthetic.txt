@@ -1,0 +1,12 @@
+SendCutSend
+Order #: SYNTH-SCS-200
+Date: 2026-10-11
+Ship to: Fictional Customer
+456 Sample Road, Demo City, ZZ 00000
+Part | Description | Quantity | Unit Price | Total
+SYNTH-SCS-A | Synthetic bracket.dxf | 3 | $5.00 | $15.00
+SYNTH-SCS-B | Synthetic plate.dxf | 1 | $7.50 | $7.50
+Subtotal: $22.50
+Shipping: $0.00
+Tax: $1.80
+Total: $24.30

@@ -360,6 +360,7 @@ function bucketsFor(
 export async function appendEntry(
   db: DatabaseHandle,
   input: AppendEntryInput,
+  transactionClient?: PoolClient,
 ): Promise<AppendEntryResult> {
   if (input.entryType !== "adjustment" && input.quantity <= 0) {
     throw new InputError(`A ${input.entryType} quantity must be greater than zero.`);
@@ -377,8 +378,12 @@ export async function appendEntry(
   // resolving the part again.
   let attemptedKey: string | undefined;
 
+  // Intake supplies its transaction so the order, all lines and purchases commit together.
+  const transact = transactionClient
+    ? async <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> => fn(transactionClient)
+    : db.transaction.bind(db);
   const write = async (): Promise<AppendEntryResult> =>
-    db.transaction(async (client) => {
+    transact(async (client) => {
       const part = await resolvePart(client, input.part, {
         create: input.createMissingPart === true,
         description: input.description,
@@ -468,7 +473,7 @@ export async function appendEntry(
     // interleaving the lock cannot cover: two writers whose first entry for a
     // brand-new part races before either holds the row. The loser's
     // transaction is already dead, so the answer has to come from a fresh one.
-    if (attemptedKey && (error as { code?: string })?.code === UNIQUE_VIOLATION) {
+    if (!transactionClient && attemptedKey && (error as { code?: string })?.code === UNIQUE_VIOLATION) {
       const key = attemptedKey;
       const existing = await db.transaction(async (client) => {
         const entry = await findByIdempotencyKey(client, key);

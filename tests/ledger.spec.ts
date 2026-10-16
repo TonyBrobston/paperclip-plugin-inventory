@@ -147,6 +147,7 @@ integration("the ledger", () => {
         "0006_boms",
         "0007_sync_state",
         "0008_part_stock",
+        "0009_intake",
       ]);
     });
   });
