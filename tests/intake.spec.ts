@@ -99,6 +99,43 @@ integration('verified email intake through the host harness', () => {
     expect(row.resolved_by).toBe('author'); expect(row.resolution_extraction).toEqual(correct());
     expect(row.agent_extraction).toEqual(wrong);
   });
+  it('reports the recorded order on retries after corrected review, including aliases', async () => {
+    const recorded = await submit();
+    const wrong = correct(); wrong.lines[0]!.quantity = 40;
+    const queued = await submit({messageId:'review-alias',agentExtraction:wrong});
+    const resolved = await resolve(queued.data?.reviewItemId,{resolution:'accept_with_corrections',corrections:correct()});
+    const retry = await submit({messageId:'review-alias'});
+    expect(resolved.data?.orderId).toBe(recorded.data?.orderId);
+    expect(retry.data).toMatchObject({status:'recorded',orderId:recorded.data?.orderId,duplicate:true,reviewItemId:queued.data?.reviewItemId});
+    expect(await count('ledger_entries')).toBe(2);
+  });
+  it('requires corrections to override a reconciled disagreement with the saved parser', async () => {
+    const wrong = correct(); wrong.lines[0]!.quantity = 8; wrong.lines[0]!.unitPrice = 1.125;
+    const queued = await submit({agentExtraction:wrong});
+    expect((await resolve(queued.data?.reviewItemId)).error).toContain('Cannot resolve');
+    expect(await count('ledger_entries')).toBe(0);
+    expect((await resolve(queued.data?.reviewItemId,{resolution:'accept_with_corrections',corrections:correct()})).error).toBeUndefined();
+    const retry = await submit();
+    expect(retry.data?.orderId).toBeTruthy(); expect(retry.data?.status).toBe('recorded');
+    expect(await count('ledger_entries')).toBe(2);
+  });
+  it('backfills legacy accepted reviews for original and alias messages on upgrade', async () => {
+    const wrong = correct(); wrong.lines[0]!.quantity=40;
+    for (const messageId of ['original-review','alias-review']) {
+      const queued = await submit({messageId,agentExtraction:wrong});
+      expect((await resolve(queued.data?.reviewItemId,{resolution:'accept_with_corrections',corrections:correct()})).error).toBeUndefined();
+    }
+    await exec(t,'ALTER TABLE review_queue DROP COLUMN resolved_order_id');
+    await exec(t,'DROP INDEX email_intake_review_id_idx');
+    await exec(t,'DROP INDEX email_intake_order_id_idx');
+    await exec(t,readFileSync(new URL('../migrations/0010_review_disposition.sql',import.meta.url),'utf8'));
+    const rows = await exec(t,'SELECT resolved_order_id FROM review_queue');
+    expect(rows.every(r=>r.resolved_order_id)).toBe(true);
+    expect(new Set(rows.map(r=>r.resolved_order_id)).size).toBe(1);
+  });
+  it('rejects malformed UUIDs before database access', async () => {
+    expect((await resolve('-'.repeat(36))).error).toContain('must be a UUID');
+  });
   it('rolls back every line, part and order if a later ledger insert fails', async () => {
     await exec(t,`CREATE FUNCTION fail_second() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.quantity_delta=2 THEN RAISE EXCEPTION 'synthetic failure'; END IF; RETURN NEW; END $$`);
     await exec(t,'CREATE TRIGGER fail_second BEFORE INSERT ON ledger_entries FOR EACH ROW EXECUTE FUNCTION fail_second()');

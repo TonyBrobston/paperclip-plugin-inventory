@@ -13,12 +13,12 @@ variants of vendor order/part identifiers do not create additional purchases.
 
 `list_review_queue` returns open items with both extractions, raw source and
 verification provenance. `resolve_review_item` requires a decision note.
-`accept` chooses the original agent extraction; `accept_with_corrections`
-requires a complete replacement extraction. Both must reconcile. The explicit
-review decision can override a supported vendor parser disagreement; original
+`accept` chooses the original agent extraction and requires agreement with any saved verifier extraction; `accept_with_corrections`
+requires a complete replacement extraction. Both must reconcile. An explicit
+`accept_with_corrections` decision can override a supported vendor parser disagreement; original
 extractions remain unchanged and the decision records its author, run, note,
 selected extraction and review id in purchase provenance. Rejection writes no
-ledger entries. A resolved review cannot be changed to another final decision.
+ledger entries. A resolved review cannot be changed to another final decision. There is no reopen tool; retries of a rejected message remain rejected. The earlier 0005 migration comment predates durable message dispositions introduced in 0009; applied migrations remain unchanged to preserve their checksums.
 
 For vendors without a parser, submission and acceptance require:
 

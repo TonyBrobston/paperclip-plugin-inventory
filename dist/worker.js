@@ -42978,7 +42978,7 @@ function reconcile(x) {
 
 // src/parsers/table.ts
 function parseTable(raw) {
-  const orderNumber = raw.match(/^Order(?: Number| #| number)?\s*:?\s*([\w-]+)\s*$/mi)?.[1];
+  const orderNumber = raw.match(/^Order(?: Number| #| number)?\s*:\s*([\w-]+)\s*$/mi)?.[1];
   const orderDate = raw.match(/^(?:Order Date|Date)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/mi)?.[1];
   const subtotal = raw.match(/^Subtotal\s*:?\s*\$?([\d,]+\.\d{2,4})\s*$/mi)?.[1];
   const rows = raw.split(/\r?\n/);
@@ -43039,7 +43039,7 @@ async function lock(client, value) {
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [value]);
 }
 async function disposition(client, messageId) {
-  const { rows } = await client.query(`SELECT i.message_id, i.order_id, i.review_id, r.status AS review_status
+  const { rows } = await client.query(`SELECT i.message_id, COALESCE(i.order_id, r.resolved_order_id) AS order_id, i.review_id, r.status AS review_status
     FROM email_intake i LEFT JOIN review_queue r ON r.id=i.review_id WHERE i.message_id=$1`, [messageId]);
   const row = rows[0];
   return row ? { status: row.order_id ? "recorded" : row.review_status, orderId: row.order_id, reviewItemId: row.review_id, duplicate: true } : void 0;
@@ -43157,7 +43157,7 @@ async function listReviewQueue(ctx, raw, run) {
 async function resolveReviewItem(ctx, raw, run) {
   const input2 = object2(raw);
   const id = text2(input2.reviewItemId, "Review item id");
-  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new InputError("Review item id must be a UUID.");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new InputError("Review item id must be a UUID.");
   const resolution = text2(input2.resolution, "Resolution");
   if (!["accept", "accept_with_corrections", "reject"].includes(resolution)) throw new InputError("Unknown review resolution.");
   const note = text2(input2.note, "Resolution note");
@@ -43175,6 +43175,10 @@ async function resolveReviewItem(ctx, raw, run) {
     if (resolution !== "reject") {
       selected = extraction(resolution === "accept_with_corrections" ? input2.corrections : item.agent_extraction);
       const reasons = reconcile(selected);
+      if (resolution === "accept" && item.parser_extraction) {
+        const saved = extraction(item.parser_extraction);
+        reasons.push(...reconcile(saved), ...disagreements(selected, saved));
+      }
       const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
       if (!parser) reasons.push(...independent(input2, selected).reasons);
@@ -43186,7 +43190,7 @@ async function resolveReviewItem(ctx, raw, run) {
     }
     const status = resolution === "reject" ? "rejected" : resolution === "accept" ? "accepted" : "accepted_with_corrections";
     await client.query(`UPDATE review_queue SET status=$2,resolution_note=$3,resolved_at=now(),resolved_by=$4,
-      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, "resolve_review_item"), independentExtraction: input2.independentExtraction, agentModel: input2.agentModel })]);
+      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, "resolve_review_item"), independentExtraction: input2.independentExtraction, agentModel: input2.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
     return { reviewItemId: id, status, orderId, duplicate: false };
   });
   return { content: `Review item ${result.status}.`, data: result };

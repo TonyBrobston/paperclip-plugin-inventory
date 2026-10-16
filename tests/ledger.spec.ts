@@ -148,6 +148,7 @@ integration("the ledger", () => {
         "0007_sync_state",
         "0008_part_stock",
         "0009_intake",
+        "0010_review_disposition",
       ]);
     });
   });

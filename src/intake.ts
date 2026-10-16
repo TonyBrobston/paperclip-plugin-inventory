@@ -35,7 +35,7 @@ async function lock(client: PoolClient, value: string) {
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [value]);
 }
 async function disposition(client: PoolClient, messageId: string) {
-  const { rows } = await client.query(`SELECT i.message_id, i.order_id, i.review_id, r.status AS review_status
+  const { rows } = await client.query(`SELECT i.message_id, COALESCE(i.order_id, r.resolved_order_id) AS order_id, i.review_id, r.status AS review_status
     FROM email_intake i LEFT JOIN review_queue r ON r.id=i.review_id WHERE i.message_id=$1`, [messageId]);
   const row = rows[0];
   return row ? { status: row.order_id ? 'recorded' : row.review_status, orderId: row.order_id, reviewItemId: row.review_id, duplicate: true } : undefined;
@@ -138,7 +138,7 @@ export async function listReviewQueue(ctx: PluginContext, raw: unknown, run: Too
 export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: ToolRunContext): Promise<ToolResult> {
   const input = object(raw);
   const id = text(input.reviewItemId, 'Review item id');
-  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new InputError('Review item id must be a UUID.');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new InputError('Review item id must be a UUID.');
   const resolution = text(input.resolution, 'Resolution');
   if (!['accept', 'accept_with_corrections', 'reject'].includes(resolution)) throw new InputError('Unknown review resolution.');
   const note = text(input.note, 'Resolution note');
@@ -156,6 +156,10 @@ export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: T
     if (resolution !== 'reject') {
       selected = extraction(resolution === 'accept_with_corrections' ? input.corrections : item.agent_extraction);
       const reasons = reconcile(selected);
+      if (resolution === 'accept' && item.parser_extraction) {
+        const saved = extraction(item.parser_extraction);
+        reasons.push(...reconcile(saved), ...disagreements(selected, saved));
+      }
       const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
       if (!parser) reasons.push(...independent(input, selected).reasons);
@@ -167,7 +171,7 @@ export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: T
     }
     const status = resolution === 'reject' ? 'rejected' : resolution === 'accept' ? 'accepted' : 'accepted_with_corrections';
     await client.query(`UPDATE review_queue SET status=$2,resolution_note=$3,resolved_at=now(),resolved_by=$4,
-      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, 'resolve_review_item'), independentExtraction: input.independentExtraction, agentModel: input.agentModel })]);
+      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, 'resolve_review_item'), independentExtraction: input.independentExtraction, agentModel: input.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
     // Retain review_id for audit, so disposition derives the accepted order through it.
     return { reviewItemId: id, status, orderId, duplicate: false };
   });

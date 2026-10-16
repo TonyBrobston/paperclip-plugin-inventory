@@ -36,3 +36,9 @@ describe('vendor extraction', () => {
     expect(selectParser(fixture('mcmaster') + '\nSendCutSend')).toBeUndefined();
   });
 });
+
+it('ignores an Order Confirmation heading when reading the order identifier', () => {
+  const text = readFileSync(new URL('./fixtures/mcmaster-synthetic.txt', import.meta.url), 'utf8');
+  expect(selectParser(text)!.parse('Order Confirmation\n' + text).orderNumber).toBe('SYNTH-MC-100');
+  expect(() => selectParser(text)!.parse(text.replace('Order Number:', 'Order Number'))).toThrow();
+});

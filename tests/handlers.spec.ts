@@ -80,7 +80,7 @@ integration("the phase 2 tools", () => {
       // The host migrates only plugins that use `ctx.db`; this one owns its
       // connection, so the first tool call is what brings the schema up.
       const rows = await exec(t, "SELECT count(*)::int AS n FROM schema_migrations");
-      expect(rows[0]!.n).toBe(9);
+      expect(rows[0]!.n).toBe(10);
       await receipt({});
       expect((await exec(t, "SELECT count(*)::int AS n FROM ledger_entries"))[0]!.n).toBe(1);
     });
