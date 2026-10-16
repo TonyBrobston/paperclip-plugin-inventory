@@ -1,0 +1,48 @@
+{
+  "name": "paperclip-plugin-inventory",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Parts inventory for a small manufacturing business, as a Paperclip plugin: an append-only Postgres ledger, vendor order-email intake verified by double extraction, and BOM-driven part consumption when products sell.",
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node ./scripts/smoke.mjs"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "src",
+    "SPEC.md",
+    "README.md"
+  ],
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "inventory",
+    "manufacturing",
+    "bom"
+  ],
+  "author": "Tony Brobston",
+  "license": "MIT",
+  "dependencies": {
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "^2026.1012.0",
+    "@paperclipai/shared": "^2026.1012.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.7.3",
+    "vitest": "^5.0.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

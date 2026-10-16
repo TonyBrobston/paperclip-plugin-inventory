@@ -1,0 +1,90 @@
+# Everything this repository is verified with, run on every push.
+#
+# The PostgreSQL service exists because the storage decision in
+# docs/sdk-notes.md rests on transactions, and a transaction test that skips
+# is not a test. Locally the integration suite skips when
+# INVENTORY_TEST_DATABASE_URL is unset; here it never does.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: typecheck, tests, build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: inventory
+          POSTGRES_PASSWORD: inventory
+          POSTGRES_DB: inventory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      INVENTORY_TEST_DATABASE_URL: postgres://inventory:inventory@localhost:5432/inventory_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # The integration half of the suite is the point of the service
+      # container above, and `describe.skip` is silent. This fails the build if
+      # it skipped, rather than letting a green run hide an unverified claim.
+      - name: the database tests actually ran
+        run: |
+          npx vitest run --config ./vitest.config.ts --reporter=json --outputFile=/tmp/vitest.json
+          node -e '
+            const run = require("/tmp/vitest.json");
+            const skipped = run.testResults
+              .flatMap((file) => file.assertionResults)
+              .filter((test) => test.status !== "passed")
+              .map((test) => test.fullName);
+            if (skipped.length) {
+              console.error("::error::These tests did not run:\n" + skipped.join("\n"));
+              process.exit(1);
+            }
+            console.log(`${run.numTotalTests} tests, none skipped`);
+          '
+
+      - run: npm run build
+
+      # dist/ is committed so an install needs no build step, which only works
+      # if it is current. A diff here means somebody changed src/ and did not
+      # rebuild.
+      #
+      # Staged first, because a plain `git diff -- dist` compares tracked files
+      # only: a brand-new build output would be untracked, invisible to the
+      # diff, and missing from the install the day it landed.
+      - name: dist/ matches src/
+        run: |
+          git add -A -- dist
+          if ! git diff --cached --exit-code -- dist; then
+            echo "::error::dist/ is stale or incomplete — run 'npm run build' and commit the result."
+            exit 1
+          fi
+
+      # Forks the built worker the way the host does and drives every tool
+      # through the real JSON-RPC protocol. The unit suite imports src/, so it
+      # cannot see a bundling fault; this step caught one already.
+      - run: npm run smoke
