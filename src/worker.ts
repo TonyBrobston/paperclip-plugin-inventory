@@ -1,0 +1,179 @@
+import {
+  definePlugin,
+  runWorker,
+  type PluginConfigValidationResult,
+  type PluginContext,
+  type ToolResult,
+  type ToolRunContext,
+} from "@paperclipai/plugin-sdk";
+import { ConfigError, isSecretRefBinding, parseDatabaseSchema, parseEnabledVendors } from "./config.js";
+import { CONFIG_KEYS, DEFAULT_DATABASE_SCHEMA, SETTINGS_PATH } from "./constants.js";
+import { closeAllDatabases } from "./db.js";
+import { TOOL_DECLARATIONS } from "./tools.js";
+
+/**
+ * Raised by a tool whose phase has not landed yet.
+ *
+ * Every tool in `SPEC.md` is registered from this phase on, so an agent's tool
+ * list is stable and a missing capability reads as "not built yet" rather than
+ * as a tool that silently is not there.
+ */
+export class NotImplementedError extends Error {
+  constructor(toolName: string, phase: number) {
+    super(
+      `${toolName} is not implemented yet — it lands in phase ${phase} of the inventory plugin build.`,
+    );
+    this.name = "NotImplementedError";
+  }
+}
+
+/**
+ * Force the structured half of a tool result to be a JSON object.
+ *
+ * The host forwards `ToolResult.data` as MCP `structuredContent`, and the
+ * agent's client requires an object there. An array, a scalar, or an absent
+ * `data` (forwarded as an explicit `null`) makes the client discard the whole
+ * result — `content` included — before the agent reads any of it.
+ *
+ * This is the defect that made every call to the BigCommerce plugin fail with
+ * `structuredContent: expected record, received null`. It is an unconditional
+ * backstop at the single point the host reads, so a tool added in a later
+ * phase cannot reintroduce it. See `docs/sdk-notes.md` (a).
+ */
+export function structured(data: unknown): Record<string, unknown> {
+  if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+    return data as Record<string, unknown>;
+  }
+  return { value: data };
+}
+
+/**
+ * Turn a thrown error into a tool result.
+ *
+ * Returning `{ error }` rather than throwing keeps the message useful: a
+ * missing config should read as "an operator needs to set this", not as a
+ * plugin crash. Only messages this plugin wrote are passed through — an
+ * arbitrary runtime error can carry a connection string, a hostname or row
+ * data in its text, and a tool result goes to an agent.
+ *
+ * `content` and `data` are set alongside `error` for the reason above: `error`
+ * alone travels in neither field the host forwards, so the message would never
+ * arrive.
+ */
+export function toolError(
+  ctx: PluginContext,
+  toolName: string,
+  companyId: string,
+  error: unknown,
+): ToolResult {
+  const expected = error instanceof ConfigError || error instanceof NotImplementedError;
+  const message = expected ? error.message : "The inventory request failed.";
+  ctx.logger.warn("Inventory tool call failed", {
+    tool: toolName,
+    companyId,
+    // The unexpected error's own text is withheld from the agent. The log is
+    // operator-facing, so record its class to keep a failure diagnosable.
+    reason: expected ? message : `unexpected ${(error as Error)?.name ?? "error"}`,
+  });
+  return { error: message, content: message, data: { error: message } };
+}
+
+/**
+ * Route a tool call to its handler.
+ *
+ * The single seam every phase adds to. Keeping it here, rather than attaching
+ * a handler to each declaration, is what lets `worker.ts` own the result
+ * shape and the error policy for all eleven tools at once.
+ */
+export async function dispatch(
+  _ctx: PluginContext,
+  declaration: (typeof TOOL_DECLARATIONS)[number],
+  _params: unknown,
+  _runCtx: ToolRunContext,
+): Promise<ToolResult> {
+  throw new NotImplementedError(declaration.name, declaration.phase);
+}
+
+const plugin = definePlugin({
+  async setup(ctx: PluginContext): Promise<void> {
+    for (const declaration of TOOL_DECLARATIONS) {
+      ctx.tools.register(
+        declaration.name,
+        {
+          displayName: declaration.displayName,
+          description: declaration.description,
+          parametersSchema: declaration.parametersSchema,
+        },
+        async (params: unknown, runCtx: ToolRunContext): Promise<ToolResult> => {
+          try {
+            const result = await dispatch(ctx, declaration, params, runCtx);
+            return { ...result, data: structured(result.data) };
+          } catch (error) {
+            return toolError(ctx, declaration.name, runCtx.companyId, error);
+          }
+        },
+      );
+    }
+
+    ctx.logger.info("Inventory plugin ready", {
+      tools: TOOL_DECLARATIONS.length,
+      // Honest about what this build is. The handlers arrive over phases 2-6.
+      implemented: 0,
+    });
+  },
+
+  /**
+   * Shape-only validation, and the "only" is deliberate.
+   *
+   * The host calls this from exactly one place: the settings page's Test
+   * Connection button. Saving does not call it — `POST
+   * /api/plugins/:id/config` validates against `instanceConfigSchema` with Ajv
+   * and nothing else — so anything that must block a save belongs in that
+   * schema. See `docs/sdk-notes.md` (b).
+   *
+   * It also cannot open the database: the host passes the config without a
+   * company id, and resolving the connection secret needs one. So it checks
+   * what it can and says plainly what it did not check, rather than reporting
+   * a green "connected" that was never tested.
+   */
+  async onValidateConfig(
+    config: Record<string, unknown>,
+  ): Promise<PluginConfigValidationResult> {
+    const errors: string[] = [];
+
+    if (!isSecretRefBinding(config[CONFIG_KEYS.databaseUrl])) {
+      errors.push(
+        `Select a Paperclip secret holding the PostgreSQL connection string. A connection string typed as plain text is refused rather than stored in ${SETTINGS_PATH}.`,
+      );
+    }
+
+    let schema = DEFAULT_DATABASE_SCHEMA;
+    try {
+      schema = parseDatabaseSchema(config[CONFIG_KEYS.databaseSchema]);
+    } catch (error) {
+      errors.push(error instanceof ConfigError ? error.message : "The schema name could not be validated.");
+    }
+
+    try {
+      parseEnabledVendors(config[CONFIG_KEYS.enabledVendors]);
+    } catch (error) {
+      errors.push(error instanceof ConfigError ? error.message : "The vendor list could not be validated.");
+    }
+
+    if (errors.length > 0) return { ok: false, errors };
+
+    return {
+      ok: true,
+      warnings: [
+        `The connection secret and the schema name "${schema}" look valid. This check does not open the database — ask an agent to run get_stock to confirm the credentials are accepted and the migrations have run.`,
+      ],
+    };
+  },
+
+  async onShutdown(): Promise<void> {
+    await closeAllDatabases();
+  },
+});
+
+export default plugin;
+runWorker(plugin, import.meta.url);
