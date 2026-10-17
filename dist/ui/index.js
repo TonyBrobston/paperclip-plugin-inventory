@@ -41,6 +41,7 @@ function InventoryPage() {
   const [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID());
   const [selected, setSelected] = useState(null), [history, setHistory] = useState("");
   const [shipment, setShipment] = useState(""), [corrections, setCorrections] = useState("");
+  const [legacyFile, setLegacyFile] = useState(null);
   async function run(operation, input = {}, done) {
     if (busy) return;
     setBusy(true);
@@ -242,6 +243,19 @@ function InventoryPage() {
       /* @__PURE__ */ jsx(Field, { name: "Allow submitters to approve their own counts", children: /* @__PURE__ */ jsx("input", { name: "self", type: "checkbox", defaultChecked: data.settings.allowSelfApproval }) }),
       /* @__PURE__ */ jsx(Field, { name: "Change reason", children: /* @__PURE__ */ jsx("input", { value: reason, onChange: (e) => setReason(e.target.value), required: true }) }),
       /* @__PURE__ */ jsx("button", { disabled: busy, children: "Save settings" }),
+      /* @__PURE__ */ jsxs("details", { children: [
+        /* @__PURE__ */ jsx("summary", { children: "Import legacy settings once" }),
+        /* @__PURE__ */ jsx("p", { children: "Choose an offline JSON export containing settings and part metadata. Stock and credentials are never imported. Enter a change reason above before importing." }),
+        /* @__PURE__ */ jsx(Field, { name: "Offline settings export", children: /* @__PURE__ */ jsx("input", { type: "file", accept: "application/json,.json", onChange: (e) => setLegacyFile(e.target.files?.[0] ?? null) }) }),
+        /* @__PURE__ */ jsx("button", { type: "button", disabled: busy || !legacyFile || !reason, onClick: async () => {
+          try {
+            const value = JSON.parse(await legacyFile.text());
+            await run("import_legacy_settings", { settings: value.settings, parts: value.parts, revision: data.revision, reason }, () => setLegacyFile(null));
+          } catch {
+            setError("The offline export must be valid JSON.");
+          }
+        }, children: "Import settings and metadata" })
+      ] }),
       /* @__PURE__ */ jsx("h3", { children: "Settings history" }),
       /* @__PURE__ */ jsx(Table, { rows: data.history ?? [], columns: [["created_at", "Time"], ["reason", "Reason"], ["operation", "Operation"]] })
     ] }, data.revision)

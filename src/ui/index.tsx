@@ -25,6 +25,7 @@ export function InventoryPage() {
  const [submissionKey,setSubmissionKey]=useState(()=>crypto.randomUUID());
  const [selected,setSelected]=useState<Row|null>(null),[history,setHistory]=useState('');
  const [shipment,setShipment]=useState(''),[corrections,setCorrections]=useState('');
+ const [legacyFile,setLegacyFile]=useState<File|null>(null);
  async function run(operation:string,input:Row={},done?:(r:Row)=>void) {
   if(busy)return;setBusy(true);setError('');setNotice('');
   try {const r=await action({operation,...input}) as Row;done?.(r);query.refresh();setNotice(r.status?`Count ${r.status}.`:r.duplicate?'Already recorded.':'Saved.');}
@@ -83,7 +84,9 @@ export function InventoryPage() {
   <p>Threshold mode requires approval when either threshold is exceeded. Discrepancies against zero expected stock require approval.</p>
   <Field name="Approver user IDs (one per line; leave empty for any authorized human)"><textarea name="approvers" rows={4} defaultValue={data.settings.approverUserIds?.join('\n')??''}/></Field>
   <Field name="Allow submitters to approve their own counts"><input name="self" type="checkbox" defaultChecked={data.settings.allowSelfApproval}/></Field>
-  <Field name="Change reason"><input value={reason} onChange={e=>setReason(e.target.value)} required/></Field><button disabled={busy}>Save settings</button><h3>Settings history</h3><Table rows={data.history??[]} columns={[["created_at","Time"],["reason","Reason"],["operation","Operation"]]}/>
+  <Field name="Change reason"><input value={reason} onChange={e=>setReason(e.target.value)} required/></Field><button disabled={busy}>Save settings</button>
+  <details><summary>Import legacy settings once</summary><p>Choose an offline JSON export containing settings and part metadata. Stock and credentials are never imported. Enter a change reason above before importing.</p><Field name="Offline settings export"><input type="file" accept="application/json,.json" onChange={e=>setLegacyFile(e.target.files?.[0]??null)}/></Field><button type="button" disabled={busy||!legacyFile||!reason} onClick={async()=>{try{const value=JSON.parse(await legacyFile!.text());await run('import_legacy_settings',{settings:value.settings,parts:value.parts,revision:data.revision,reason},()=>setLegacyFile(null));}catch{setError('The offline export must be valid JSON.');}}}>Import settings and metadata</button></details>
+  <h3>Settings history</h3><Table rows={data.history??[]} columns={[["created_at","Time"],["reason","Reason"],["operation","Operation"]]}/>
  </form>}
  </main>;
 }
