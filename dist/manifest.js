@@ -19,13 +19,6 @@ var CONFIG_KEYS = {
    */
   databaseSchema: "databaseSchema",
   /**
-   * Vendors whose parsers are enabled for this company.
-   *
-   * Which vendors a business buys from is a deployment setting, so it comes
-   * from config. The parser modules themselves ship with the plugin.
-   */
-  enabledVendors: "enabledVendors",
-  /**
    * The private config repository holding `bom/`, as `owner/name`.
    *
    * Which repository is a deployment setting, so it comes from config rather
@@ -50,12 +43,6 @@ var CONFIG_KEYS = {
 };
 var DEFAULT_DATABASE_SCHEMA = "inventory";
 var SCHEMA_NAME_PATTERN = "^[a-z_][a-z0-9_]{0,62}$";
-var SUPPORTED_VENDORS = [
-  "mcmaster",
-  "sendcutsend",
-  "amazon",
-  "formlabs"
-];
 
 // src/tools.ts
 var PART_ID = {
@@ -287,20 +274,54 @@ var TOOL_DECLARATIONS = [
     }
   },
   {
-    name: "sync_sheet",
-    displayName: "Sync the Google Sheet",
-    description: "Push system-owned columns to the inventory sheet, read the human-owned ones back, turn Adjustments-tab rows into ledger adjustments and mark them processed, and refresh the Needs Review view.",
+    name: "inventory_page",
+    displayName: "Read Inventory pages",
+    description: "Read inventory, counts, receiving, review, settings, history or dashboard data in the host-authorized company.",
     phase: 4,
-    parametersSchema: {
-      type: "object",
-      properties: {
-        dryRun: {
-          type: "boolean",
-          description: "Report what would change without writing to the sheet or the ledger.",
-          default: false
-        }
-      }
-    }
+    parametersSchema: { type: "object", properties: {
+      page: { type: "string", enum: ["inventory", "counts", "receiving", "review", "settings", "history", "dashboard"] },
+      search: { type: "string" },
+      vendor: { type: "string" },
+      active: { type: "string", enum: ["all", "true", "false"] },
+      lowStock: { type: "boolean" },
+      orderId: { type: "string" },
+      partId: { type: "string" }
+    }, required: ["page"] }
+  },
+  {
+    name: "inventory_action",
+    displayName: "Manage Inventory",
+    description: "Preview and submit atomic physical counts or receipts under Inventory policy. Human approval, metadata, settings and review operations require authenticated host authority; actor fields in parameters grant no permission.",
+    phase: 4,
+    parametersSchema: { type: "object", properties: {
+      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "refresh_refund_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
+      lines: { type: "array", items: { type: "object", properties: { partId: { type: "string" }, counted: { type: "number" }, expected: { type: "number" }, ledgerRevision: { type: "string" }, quantity: { type: "number" } }, required: ["partId"] } },
+      reason: { type: "string" },
+      submissionKey: { type: "string" },
+      countId: { type: "string" },
+      orderId: { type: "string" },
+      previewId: { type: "string" },
+      shipmentReference: { type: "string" },
+      partId: { type: "string" },
+      quantityDelta: { type: "number" },
+      reference: { type: "string" },
+      revision: { type: "string" },
+      settings: { type: "object" },
+      parts: { type: "array", items: { type: "object" } },
+      reorderPoint: { type: "number" },
+      targetQuantity: { type: "number" },
+      location: { type: "string" },
+      notes: { type: "string" },
+      active: { type: "boolean" },
+      ledgerRevision: { type: "string" },
+      outstanding: { type: "number" },
+      reviewItemId: { type: "string" },
+      resolution: { type: "string", enum: ["accept", "accept_with_corrections", "reject"] },
+      note: { type: "string" },
+      corrections: { type: "object" },
+      independentExtraction: { type: "object" },
+      agentModel: { type: "string" }
+    }, required: ["operation"] }
   },
   {
     name: "sync_boms",
@@ -346,10 +367,16 @@ var manifest = {
   description: "Parts inventory for a small manufacturing business. Records purchases from vendor order emails with a double-extraction check, derives on-hand stock from an append-only ledger, and consumes parts through a bill of materials when products sell.",
   author: "Tony Brobston",
   categories: ["automation"],
-  capabilities: ["secrets.read-ref", "agent.tools.register"],
+  capabilities: ["secrets.read-ref", "agent.tools.register", "ui.page.register", "ui.sidebar.register", "ui.dashboardWidget.register", "ui.action.register"],
   entrypoints: {
-    worker: "./dist/worker.js"
+    worker: "./dist/worker.js",
+    ui: "./dist/ui"
   },
+  ui: { slots: [
+    { id: "inventory", type: "page", displayName: "Inventory", exportName: "InventoryPage", routePath: "inventory" },
+    { id: "inventory-nav", type: "sidebar", displayName: "Inventory", exportName: "InventorySidebar" },
+    { id: "inventory-alerts", type: "dashboardWidget", displayName: "Inventory", exportName: "InventoryDashboard" }
+  ] },
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -375,19 +402,6 @@ var manifest = {
           // itself, so over-constraining it here is what makes a legitimate
           // pinned-version binding impossible to save.
         },
-        required: ["type", "secretId"]
-      },
-      spreadsheetId: {
-        type: "string",
-        title: "Spreadsheet ID (optional until Sheet sync)",
-        description: "Copy from private deployment settings. Never put a real spreadsheet ID in public code.",
-        pattern: "^[a-zA-Z0-9_-]{10,200}$"
-      },
-      googleServiceAccount: {
-        type: "object",
-        format: "secret-ref",
-        title: "Google service-account JSON key",
-        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
         required: ["type", "secretId"]
       },
       [CONFIG_KEYS.configRepo]: {
@@ -442,16 +456,6 @@ var manifest = {
         // again in `parseDatabaseSchema` at request time, so the form and the
         // worker cannot disagree about what is acceptable.
         pattern: SCHEMA_NAME_PATTERN
-      },
-      [CONFIG_KEYS.enabledVendors]: {
-        type: "array",
-        title: "Enabled vendors (optional)",
-        description: "Which vendor order-email parsers to run. Leave blank to enable all of them. A vendor with no parser cannot be enabled here; its orders need a second independent extraction instead.",
-        items: {
-          type: "string",
-          enum: [...SUPPORTED_VENDORS]
-        },
-        uniqueItems: true
       }
     },
     required: [CONFIG_KEYS.databaseUrl]

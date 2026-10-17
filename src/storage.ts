@@ -20,7 +20,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { resolveConnection } from "./config.js";
 import { SETTINGS_PATH } from "./constants.js";
 import { getDatabase, type DatabaseHandle } from "./db.js";
-import { StorageError } from "./errors.js";
+import { InputError, StorageError } from "./errors.js";
 import { migrate } from "./migrate.js";
 
 /**
@@ -96,6 +96,7 @@ export async function openStore(
   ctx: PluginContext,
   companyId: string,
 ): Promise<DatabaseHandle> {
+  if (typeof companyId !== 'string' || !companyId.trim()) throw new InputError('Host-authorized company is required.');
   const { connectionString, settings } = await resolveConnection(ctx, companyId);
 
   let db: DatabaseHandle;
@@ -128,5 +129,10 @@ export async function openStore(
     );
   }
 
+  await db.transaction(async client => {
+    await client.query('INSERT INTO company_scope(singleton,company_id) VALUES(true,$1) ON CONFLICT DO NOTHING', [companyId]);
+    const result = await client.query('SELECT company_id FROM company_scope WHERE singleton=true');
+    if (result.rows[0]?.company_id !== companyId) throw new InputError('This inventory schema belongs to another company. Configure a dedicated schema.');
+  });
   return db;
 }

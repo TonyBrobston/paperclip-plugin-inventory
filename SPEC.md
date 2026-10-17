@@ -6,7 +6,7 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 
 * Purchases are recorded from vendor order emails.
 * Sales come from BigCommerce and consume parts via a bill of materials.
-* A Google Sheet is the human-facing view and settings layer.
+* Native Paperclip plugin UI is the human-facing view and settings layer.
 * Postgres is the source of truth for history.
 
 ## Architecture (keep these separated)
@@ -16,7 +16,7 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 * **Plugin**: vendor-agnostic inventory core, a vendor parser registry, BOM handling and validation. Rules live in the plugin.
 * **BigCommerce plugin**: a separate plugin. Integration is via plugin events if supported, otherwise via an agent-run reconcile tool. Structured data like shipments needs no agent judgment, so prefer code paths.
 * Built with `@paperclipai/plugin-sdk` (JSON-RPC).
-* All deployment-specific values (DB connection, Sheet ID, enabled vendors, config repo location) come from config/secrets, never from code.
+* All deployment-specific values (DB connection, enabled vendors, config repo location) come from config/secrets, never from code.
 
 ## Storage
 
@@ -25,7 +25,10 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 
 ### Core tables (adjust as needed)
 
-* `parts`: internal id, vendor, vendor part number, description, unit of measure.
+* `parts`: internal id, vendor, vendor part number, description, unit of measure; human-owned reorder point, target quantity, storage location, notes and active status in PostgreSQL.
+* `physical_counts` / count lines: immutable original counts, expected stock and revision, discrepancy, status, submission key and submitter provenance.
+* Adjustment approvals: authenticated approver/time/reason, policy snapshot, unique count-to-ledger linkage.
+* Inventory operational settings: enabled vendors, discrepancy thresholds and approval policies with audited updates.
 * `orders`: vendor, vendor order number, order date, subtotal, source Gmail message ID, raw email text, status.
 * `order_lines`: order, part, quantity, unit price, line total.
 * `ledger_entries`: part, type (`purchase` | `receipt` | `sale` | `adjustment`), quantity delta, cost, reference, created\_at, created\_by.
@@ -51,7 +54,9 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 * `record_sale({ productSku, options, qty, reference })`: expands through the active BOM version into part consumption.
 * `list_review_queue`, `resolve_review_item`
 * `get_stock(partId?)`, `get_sellable(productSku?)`
-* `sync_sheet()`, `sync_boms()`
+* `sync_boms()`
+* `inventory_page({ page, ...filters })`: read native inventory, counts, receiving, review, settings and dashboard data.
+* `inventory_action({ operation, ...parameters })`: physical count preview/submission, approval/rejection/reconciliation and settings operations, shared with the native UI.
 * `reconcile_bigcommerce()`: fallback if plugin events aren't available.
 
 ## Verification (double extraction)
@@ -100,15 +105,22 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 * **Sellable quantity per product:** across the product's BOM parts, the lowest value of floor((on hand − committed) / quantity per product).
 * Push sellable quantity to BigCommerce after any ledger change affecting that product. The inventory plugin is the source of truth; BigCommerce only displays the number.
 
-## Google Sheet
+## Native Inventory UI
 
-* **Inventory tab.** Two kinds of columns:
-  * System-owned (overwritten on sync, protected range): on hand, committed, on order, sellable impact, last cost, avg cost, last ordered.
-  * Human-owned (read on sync, never overwritten): reorder point, target qty, location, notes, active.
-* **Adjustments tab.** A human enters physical counts; the sync converts each count into ledger adjustments and marks the row processed.
-* **Needs Review tab.** A view of `review_queue`.
-* No BOM tab. BOMs live in the config repo.
-* Auth via a Google service account shared on the one spreadsheet.
+Inventory management lives inside Paperclip as plugin pages/navigation and a dashboard widget where the installed host supports them. No separate application is authorized.
+
+* Inventory: searchable/filterable parts with on-hand, committed, on-order, available (on-hand minus committed), last cost, average cost and last ordered. Edit reorder point, target quantity, storage location, notes and active status in PostgreSQL.
+* Physical Counts: single/batch count entry with ledger-derived expected stock and discrepancy preview before approval. Persist original count, expected quantity, ledger revision, submitter/time and reason. Approval records authenticated approver/time/reason and links the resulting append-only adjustment.
+* Reconciliation: immutable submission/idempotency keys and transactional uniqueness prevent duplicate adjustments. Lock/version-check affected stock at approval; stale snapshots must conflict and require a fresh preview/recount, never silently overwrite subsequent activity. Batch behavior must be explicit and atomic or expose per-line outcomes safely. Configurable thresholds and approval policies apply equally to UI, tools and direct adjustment paths.
+* Needs Review: vendor discrepancies, failed verification and adjustment approvals; approve, reject, resolve with provenance. Rejected or unresolved items never write stock.
+* Settings: enabled vendors and inventory operational/approval settings, persisted in PostgreSQL with migration and validation.
+* Dashboard: low-stock counts, pending reviews and actionable alerts linked to relevant pages.
+* One domain/service layer backs agent tools and UI data/actions. Neither browser nor agent-supplied actor/company fields are authority. Require host-derived identity, company authorization and role checks; document which permissions the host supplies and which the plugin enforces.
+* Before implementation, verify installed SDK and running host versions, UI entrypoint/slot registration, page routes/navigation/widget support, data/action bridge and authentication/authorization against actual source and executable probes. Record limitations in docs/sdk-notes.md. Board-only discovery returning 403 for agents is not evidence of missing UI support. No core fork changes or standalone app without Tony’s separate approval.
+
+## Deployment and recovery
+
+Automate setup and additive, versioned PostgreSQL migrations; keep existing ledger/provenance/history intact. Move human-owned settings into PostgreSQL with explicit precedence and a validated, optional one-time legacy import that requires no new Google authentication. Remove Sheets adapters, tools, config, credentials, dependencies and spreadsheet-specific documentation from the active product. Do not rewrite historical migrations. Document backup/restore, private config and secret bindings, supported version/build, upgrade/rollback and a single deployment command where practical. Test clean installation, upgrade from the merged schema and recovery from backup without double processing.
 
 ## Out of scope for now
 

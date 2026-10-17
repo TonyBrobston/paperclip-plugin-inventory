@@ -8,6 +8,7 @@ import type { DatabaseHandle } from "./db.js";
 import { InputError } from "./errors.js";
 import { selectLines, type OptionSelection } from "./bom.js";
 import { readActiveBom } from "./sales.js";
+import { appliedRefundUnits, submitAdjustmentBatch } from "./native-service.js";
 import { appendEntry } from "./ledger.js";
 import { parsePartRef } from "./parts.js";
 import { openStore } from "./storage.js";
@@ -168,6 +169,8 @@ export async function applyOrderLine(
         reversed,
         bomId,
       };
+    // Match the count service lock order before taking shared stock locks.
+    await client.query('SELECT singleton FROM operational_settings WHERE singleton=true FOR UPDATE');
     // All paths lock shared parts in one order, matching appendEntry's locks.
     const resolved = await client.query(
       `SELECT id,vendor,vendor_part_number FROM parts ORDER BY id FOR UPDATE`,
@@ -178,6 +181,26 @@ export async function applyOrderLine(
         p.id,
       ]),
     );
+    // Approval commits stock before this checkpoint is retried. Read durable
+    // applied counts (including audited successors), rather than crediting that
+    // stock again when a newer cumulative observation arrives first.
+    const credited = Math.max(Number(prior?.reversed ?? 0),
+      await appliedRefundUnits(client, input.orderId, input.lineId));
+    // An older, uncheckpointed snapshot cannot roll approved progress back.
+    if (reversed < credited) return { stale: true };
+    const credit = reversed - credited;
+    if (credit > 0) {
+      const deltas=expansion.map(part=>{
+        const partId=ids.get(part.part.toLowerCase());
+        if(!partId)throw new InputError("Pinned BOM part no longer exists.");
+        return {partId,quantity:round(credit*part.quantity)};
+      });
+      const adjustment=await submitAdjustmentBatch(db,client,{type:'agent',id:run.agentId,companyId:run.companyId},deltas,
+        JSON.stringify(['bc-refund',input.orderId,input.lineId,reversed]),
+        `BigCommerce refund ${input.orderId}/${input.lineId}: ${reversed} returned units; BOM ${bomId}`,false,
+        expansion.map(part=>({partId:ids.get(part.part.toLowerCase())!,quantity:part.quantity})));
+      if(adjustment.status!=='applied')return {pendingApproval:true,...adjustment};
+    }
     for (const part of expansion) {
       const id = ids.get(part.part.toLowerCase());
       if (!id) throw new InputError("Pinned BOM part no longer exists.");
@@ -189,28 +212,6 @@ export async function applyOrderLine(
         bomId,
         observedAt: input.observedAt,
       };
-      // Refund credit first permits a first observation of a shipped/refunded
-      // order without requiring stock for units that immediately return.
-      const credit = reversed - Number(prior?.reversed ?? 0);
-      if (credit > 0)
-        await appendEntry(
-          db,
-          {
-            part: parsePartRef(part.part),
-            entryType: "adjustment",
-            quantity: round(credit * part.quantity),
-            reference: JSON.stringify([
-              input.orderId,
-              input.lineId,
-              "refund",
-              reversed,
-            ]),
-            idempotencyScope: ["bc-refund"],
-            provenance,
-            createdBy: run.agentId,
-          },
-          client,
-        );
       const consumed = input.shipped - Number(prior?.shipped ?? 0);
       if (consumed > 0)
         await appendEntry(
@@ -446,7 +447,8 @@ export async function reconcileBigcommerce(
       data: { results, dryRun: true },
     };
   const stock = await pushStock(ctx, run);
-  await db.transaction(async (c) => {
+  const pendingApproval=results.some(result => 'pendingApproval' in result && result.pendingApproval);
+  if (!pendingApproval) await db.transaction(async (c) => {
     await c.query(
       `INSERT INTO sync_state(key,cursor) VALUES('bigcommerce',$1)
     ON CONFLICT(key) DO UPDATE SET cursor=GREATEST(sync_state.cursor,EXCLUDED.cursor),updated_at=now()`,
@@ -455,6 +457,6 @@ export async function reconcileBigcommerce(
   });
   return {
     content: `Reconciled ${results.length} order lines.`,
-    data: { results, ...stock, cursor: started },
+    data: { results, ...stock, pendingApproval, cursor: pendingApproval ? since ?? null : started },
   };
 }

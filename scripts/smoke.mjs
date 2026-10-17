@@ -171,7 +171,7 @@ try {
    * tools must come back with something an operator can act on, through the
    * real bundle, rather than taking the worker down with them.
    */
-  const IMPLEMENTED = new Set(["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"]);
+  const IMPLEMENTED = new Set(["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce", "inventory_action", "inventory_page"]);
 
   for (const tool of manifest.tools) {
     const result = await send("executeTool", {
@@ -186,7 +186,7 @@ try {
     // The remaining handlers land over phases 3-6. Until then the honest
     // answer is which phase the tool is waiting on.
     const expected = IMPLEMENTED.has(tool.name)
-      ? /could not be (opened|brought up to date)|is required|not a part reference|must be a UUID|Configure the inventory spreadsheet ID|Set the private config repository/
+      ? /could not be (opened|brought up to date)|is required|not a part reference|must be a UUID|Set the private config repository/
       : /phase \d/;
 
     for (const [label, text] of [

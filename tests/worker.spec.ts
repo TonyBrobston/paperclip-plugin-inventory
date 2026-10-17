@@ -146,13 +146,12 @@ describe("onValidateConfig", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("refuses a vendor with no parser", async () => {
+  it("leaves operational settings validation to native PostgreSQL Settings", async () => {
     const result = await validate({
       [CONFIG_KEYS.databaseUrl]: { type: "secret_ref", secretId: "db" },
-      [CONFIG_KEYS.enabledVendors]: ["mcmaster", "grainger"],
     });
-    expect(result.ok).toBe(false);
-    expect(result.errors?.join(" ")).toContain("grainger");
+    expect(result.ok).toBe(true);
+    expect(manifest.instanceConfigSchema?.properties).not.toHaveProperty('enabledVendors');
   });
 
   it("accepts a well-formed config, and says what it did not check", async () => {

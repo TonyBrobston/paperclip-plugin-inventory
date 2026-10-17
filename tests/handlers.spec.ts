@@ -80,7 +80,7 @@ integration("the phase 2 tools", () => {
       // The host migrates only plugins that use `ctx.db`; this one owns its
       // connection, so the first tool call is what brings the schema up.
       const rows = await exec(t, "SELECT count(*)::int AS n FROM schema_migrations");
-      expect(rows[0]!.n).toBe(13);
+      expect(rows[0]!.n).toBe(15);
       await receipt({});
       expect((await exec(t, "SELECT count(*)::int AS n FROM ledger_entries"))[0]!.n).toBe(1);
     });
@@ -205,29 +205,30 @@ integration("the phase 2 tools", () => {
     it("corrects stock downward", async () => {
       await receipt({});
       const result = await adjust({});
-      expect(result.data).toMatchObject({ recorded: true, stock: { onHand: 3 } });
+      expect(result.data).toMatchObject({ status: "pending", duplicate: false });
+      expect((await call("get_stock",{partId:"vendor-a:part-001"})).data).toMatchObject({parts:[{onHand:5}]});
     });
 
-    it("is allowed to leave stock negative, and says so", async () => {
+    it("holds a negative-stock adjustment for approval", async () => {
       // SPEC.md's one exception to the non-negative rule. It is also almost
       // always a missing receipt, which is worth saying out loud.
       const result = await adjust({ quantityDelta: -4 });
       expect(result.error).toBeUndefined();
-      expect(result.data).toMatchObject({ stock: { onHand: -4 } });
-      expect(result.content).toMatch(/negative.*check whether a receipt is missing/s);
+      expect(result.data).toMatchObject({status:"pending"});
+      expect(await exec(t,"SELECT * FROM ledger_entries")).toHaveLength(0);
     });
 
     it("applies a referenced adjustment once however often the sync runs", async () => {
       await adjust({ reference: "sheet-row-12" });
       const again = await adjust({ reference: "sheet-row-12" });
-      expect(again.data).toMatchObject({ duplicate: true, stock: { onHand: -2 } });
+      expect(again.data).toMatchObject({ duplicate: true, status: "pending" });
     });
 
     it("applies it once even when the sync spells the part number differently", async () => {
       // A sheet row re-read with the vendor's own casing is the same row.
       await adjust({ reference: "sheet-row-12" });
       const again = await adjust({ partId: "vendor-a:PART-001", reference: "sheet-row-12" });
-      expect(again.data).toMatchObject({ duplicate: true, stock: { onHand: -2 } });
+      expect(again.data).toMatchObject({ duplicate: true, status: "pending" });
     });
 
     it("treats an unreferenced adjustment as a new event each time", async () => {
@@ -236,7 +237,8 @@ integration("the phase 2 tools", () => {
       await adjust({});
       await adjust({});
       const stock = await call("get_stock", { partId: "vendor-a:part-001" });
-      expect(stock.data).toMatchObject({ parts: [{ onHand: -4 }] });
+      expect(stock.data).toMatchObject({ parts: [{ onHand: 0 }] });
+      expect(await exec(t,"SELECT * FROM physical_counts")).toHaveLength(2);
     });
 
     it("requires a reason, because an adjustment has no document behind it", async () => {
@@ -247,11 +249,11 @@ integration("the phase 2 tools", () => {
       expect((await adjust({ quantityDelta: 0 })).error).toMatch(/cannot be zero/);
     });
 
-    it("keeps the reason as the entry's note and in its provenance", async () => {
+    it("keeps the original reason and authenticated submitter in the count", async () => {
       await adjust({ reason: "annual count, two short" });
-      const rows = await exec(t, "SELECT note, provenance FROM ledger_entries");
-      expect(rows[0]!.note).toBe("annual count, two short");
-      expect(rows[0]!.provenance).toMatchObject({ reason: "annual count, two short" });
+      const rows = await exec(t, "SELECT reason, submitted_by FROM physical_counts");
+      expect(rows[0]!.reason).toBe("annual count, two short");
+      expect(rows[0]!.submitted_by).toMatchObject({type:"agent",id:"agent-7",companyId});
     });
   });
 

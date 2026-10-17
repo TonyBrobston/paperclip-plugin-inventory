@@ -6,7 +6,7 @@ import {
   type ToolResult,
   type ToolRunContext,
 } from "@paperclipai/plugin-sdk";
-import { ConfigError, isSecretRefBinding, parseDatabaseSchema, parseEnabledVendors } from "./config.js";
+import { ConfigError, isSecretRefBinding, parseDatabaseSchema } from "./config.js";
 import { CONFIG_KEYS, DEFAULT_DATABASE_SCHEMA, SETTINGS_PATH } from "./constants.js";
 import { closeAllDatabases } from "./db.js";
 import { OperatorFacingError } from "./errors.js";
@@ -15,7 +15,9 @@ import { submitOrderEmail, listReviewQueue, resolveReviewItem } from "./intake.j
 import { getSellable, reconcileBigcommerce, pushStock } from "./bridge.js";
 import { syncBoms } from "./bom-sync.js";
 import { recordSale } from "./sales.js";
-import { syncSheet } from "./sheet-sync.js";
+import { registerNative, nativeAction, toolActor } from "./native.js";
+import { readNative } from "./native-service.js";
+import { openStore } from "./storage.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
 
 /**
@@ -102,7 +104,7 @@ export function toolError(
  * tool named here that still throws `NotImplementedError`, or one missing
  * from it that works, means the two have drifted.
  */
-export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"] as const;
+export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_boms", "inventory_action", "inventory_page", "record_sale", "get_sellable", "reconcile_bigcommerce"] as const;
 
 export async function dispatch(
   ctx: PluginContext,
@@ -110,13 +112,21 @@ export async function dispatch(
   params: unknown,
   runCtx: ToolRunContext,
 ): Promise<ToolResult> {
+  toolActor(runCtx);
   switch (declaration.name) {
+    case "inventory_action": {
+      const data = structured(await nativeAction(ctx, toolActor(runCtx), params));
+      return { content: 'Inventory operation completed.', data };
+    }
+    case "inventory_page": {
+      const input = params as Record<string, unknown>;
+      const db = await openStore(ctx, runCtx.companyId);
+      return { content: 'Inventory data.', data: structured(await readNative(db, String(input.page ?? 'inventory'), input)) };
+    }
     case "get_sellable":
       return getSellable(ctx, params, runCtx);
     case "reconcile_bigcommerce":
       return reconcileBigcommerce(ctx, params, runCtx);
-    case "sync_sheet":
-      return syncSheet(ctx, params, runCtx);
     case "sync_boms":
       return syncBoms(ctx, params, runCtx);
     case "record_sale":
@@ -140,6 +150,7 @@ export async function dispatch(
 
 const plugin = definePlugin({
   async setup(ctx: PluginContext): Promise<void> {
+    registerNative(ctx);
     for (const declaration of TOOL_DECLARATIONS) {
       ctx.tools.register(
         declaration.name,
@@ -152,7 +163,7 @@ const plugin = definePlugin({
           try {
             const result = await dispatch(ctx, declaration, params, runCtx);
             const data = structured(result.data);
-            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_sheet", "sync_boms"].includes(declaration.name);
+            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_boms"].includes(declaration.name);
             if (mutates && !(params as { dryRun?: boolean } | null)?.dryRun && !result.error) {
               try { data.stockSync = await pushStock(ctx, runCtx); }
               catch { data.stockSync = { pending: true, message: "Local change saved; stock push pending. Run reconcile_bigcommerce to retry." }; }
@@ -203,12 +214,6 @@ const plugin = definePlugin({
       schema = parseDatabaseSchema(config[CONFIG_KEYS.databaseSchema]);
     } catch (error) {
       errors.push(error instanceof ConfigError ? error.message : "The schema name could not be validated.");
-    }
-
-    try {
-      parseEnabledVendors(config[CONFIG_KEYS.enabledVendors]);
-    } catch (error) {
-      errors.push(error instanceof ConfigError ? error.message : "The vendor list could not be validated.");
     }
 
     if (errors.length > 0) return { ok: false, errors };

@@ -6,3 +6,5 @@ node_modules/
 # not: they are mostly inlined SDK source and dwarf the rest of the repo.
 # Run `npm run build` to regenerate them locally.
 dist/*.map
+
+dist/ui/*.map

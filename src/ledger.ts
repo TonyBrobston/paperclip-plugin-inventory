@@ -23,6 +23,7 @@
  *     and waived only for `adjustment`, which is the spec's named exception.
  */
 
+import { authorizeAdjustment } from "./native-policy.js";
 import type { PoolClient } from "pg";
 import type { DatabaseHandle } from "./db.js";
 import { InputError, LedgerError } from "./errors.js";
@@ -59,6 +60,7 @@ export interface Provenance {
 }
 
 export interface AppendEntryInput {
+  countLineId?: string;
   part: PartRef;
   entryType: LedgerEntryType;
   /** Always positive; the entry type decides the direction. */
@@ -293,7 +295,8 @@ async function outstandingOnOrder(
        FROM ledger_entries WHERE part_id = $1 AND reference = $2`,
     [partId, reference],
   );
-  return Math.max(toNumber(rows[0]?.outstanding), 0);
+  const closed = await client.query(`SELECT COALESCE(sum(c.quantity),0) AS quantity FROM order_short_closes c JOIN orders o ON o.id=c.order_id WHERE c.part_id=$1 AND o.vendor_order_number=$2`, [partId,reference]);
+  return Math.max(toNumber(rows[0]?.outstanding) - toNumber(closed.rows[0]?.quantity), 0);
 }
 
 async function currentOnHand(client: PoolClient, partId: string): Promise<number> {
@@ -418,10 +421,16 @@ export async function appendEntry(
         }
       }
 
+      if (input.entryType === 'adjustment') await authorizeAdjustment(client, input.countLineId, part.partId, input.quantity);
+
       const outstanding =
         input.entryType === "receipt"
           ? await outstandingOnOrder(client, part.partId, reference)
           : 0;
+      if (input.entryType === 'receipt' && input.quantity > outstanding) {
+        const ordered = await client.query("SELECT 1 FROM ledger_entries WHERE part_id=$1 AND reference=$2 AND entry_type='purchase' LIMIT 1", [part.partId, reference]);
+        if (ordered.rowCount && !input.note?.trim()) throw new InputError('Receiving more than the outstanding order requires an overage reason.');
+      }
       const deltas = bucketsFor(input.entryType, input.quantity, outstanding);
 
       // SPEC.md: "On-hand never goes negative without an explicit
@@ -440,8 +449,8 @@ export async function appendEntry(
       const { rows } = await client.query<RawEntryRow>(
         `INSERT INTO ledger_entries
            (part_id, entry_type, quantity_delta, on_hand_delta, on_order_delta,
-            unit_cost, reference, idempotency_key, note, provenance, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+            unit_cost, reference, idempotency_key, note, provenance, created_by, count_line_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
          RETURNING ${ENTRY_COLUMNS}`,
         [
           part.partId,
@@ -455,6 +464,7 @@ export async function appendEntry(
           input.note ?? null,
           JSON.stringify(input.provenance),
           input.createdBy,
+          input.countLineId ?? null,
         ],
       );
 

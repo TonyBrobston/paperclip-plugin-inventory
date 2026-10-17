@@ -97,8 +97,9 @@ describe("settings form", () => {
     expect(new RegExp(pattern).test("Inventory")).toBe(false);
   });
 
-  it("offers exactly the vendors a parser ships for", () => {
-    const items = properties[CONFIG_KEYS.enabledVendors]!.items as Record<string, unknown>;
-    expect(items.enum).toEqual([...SUPPORTED_VENDORS]);
+  it("keeps operational and Google configuration out of host settings", () => {
+    expect(properties).not.toHaveProperty("enabledVendors");
+    expect(properties).not.toHaveProperty("spreadsheetId");
+    expect(properties).not.toHaveProperty("googleServiceAccount");
   });
 });

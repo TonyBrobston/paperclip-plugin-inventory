@@ -16,6 +16,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendEntry, readEntries, readStock, type Provenance } from "../src/ledger.js";
+import { executeNative } from "../src/native-service.js";
 import { InputError, LedgerError } from "../src/errors.js";
 import { parsePartRef, type PartRef } from "../src/parts.js";
 import { quoteIdentifier } from "../src/db.js";
@@ -50,6 +51,7 @@ integration("the ledger", () => {
     appendEntry(t.db, {
       part,
       entryType: "receipt",
+      note: "Synthetic receipt: overages checked",
       quantity,
       reference,
       idempotencyScope: scope ?? ["receipt"],
@@ -81,18 +83,14 @@ integration("the ledger", () => {
       createdBy: AGENT,
     });
 
-  const adjustment = (quantityDelta: number, reference: string, scope?: readonly string[]) =>
-    appendEntry(t.db, {
-      part,
-      entryType: "adjustment",
-      quantity: quantityDelta,
-      reference,
-      idempotencyScope: scope,
-      note: "physical count",
-      provenance: PROVENANCE,
-      createdBy: AGENT,
-      createMissingPart: true,
+  const adjustment = async (quantityDelta: number, reference: string, scope?: readonly string[]) => {
+    if(!quantityDelta) throw new InputError('The adjustment changes nothing.');
+    const result=await executeNative(t.db,{type:'agent',id:AGENT,companyId:'company-1'},'adjust',{
+      partId:'vendor-a:part-001',quantityDelta,reason:'physical count',...(scope?{reference}:{}),
     });
+    if(result.status==='pending')await executeNative(t.db,{type:'user',id:'reviewer',companyId:'company-1'},'approve_count',{countId:result.countId,reason:'Verified synthetic count'});
+    return result;
+  };
 
   const stockOf = async () => (await readStock(t.db, part))[0]!;
 
@@ -152,6 +150,8 @@ integration("the ledger", () => {
         "0011_sheet_sync",
         "0012_bom_catalog_keys",
         "0013_bigcommerce_bridge",
+        "0014_native_inventory",
+        "0015_company_scope",
       ]);
     });
   });
@@ -364,7 +364,7 @@ integration("the ledger", () => {
           t,
           `INSERT INTO ledger_entries
              (part_id, entry_type, quantity_delta, on_hand_delta, reference, provenance, created_by)
-           VALUES ($1, 'adjustment', 1, 1, 'count', '{"source":"manual"}'::jsonb, 'someone')`,
+           VALUES ($1, 'receipt', 1, 1, 'receipt', '{"source":"manual"}'::jsonb, 'someone')`,
           [partId],
         );
       }
@@ -658,17 +658,16 @@ integration("the ledger", () => {
              VALUES ($1, ${values}, 'ref', '{"source":"manual"}'::jsonb, 'someone')`,
             [partId],
           ),
-        ).rejects.toThrow(/ledger_(buckets_match_entry_type|entry_type_known)/);
+        ).rejects.toThrow(/ledger_(buckets_match_entry_type|entry_type_known)|authorized count line/);
       });
     }
 
-    it("accepts the four well-formed shapes", async () => {
+    it("accepts unguarded purchase, receipt and sale shapes", async () => {
       const partId = await insertPart(t, "vendor-a", "part-ok");
       for (const values of [
         "'purchase', 5, 0, 5",
         "'receipt', 5, 5, -5",
         "'sale', -2, -2, 0",
-        "'adjustment', -1, -1, 0",
       ]) {
         await exec(
           t,
@@ -679,7 +678,7 @@ integration("the ledger", () => {
         );
       }
       const rows = await exec(t, "SELECT on_hand, on_order FROM part_stock WHERE part_id = $1", [partId]);
-      expect(Number(rows[0]!.on_hand)).toBe(2);
+      expect(Number(rows[0]!.on_hand)).toBe(3);
       expect(Number(rows[0]!.on_order)).toBe(0);
     });
   });
