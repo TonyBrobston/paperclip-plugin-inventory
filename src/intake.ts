@@ -46,7 +46,9 @@ async function previousOrder(client: PoolClient, vendor: string, order: Extracti
   if (!old) return undefined;
   const lines = await client.query(`SELECT p.vendor_part_number, l.quantity, l.unit_price FROM order_lines l JOIN parts p ON p.id=l.part_id WHERE l.order_id=$1 ORDER BY l.line_number`, [old.id]);
   const stored = extraction({ orderNumber: old.vendor_order_number, ...(old.order_date ? { orderDate: old.order_date } : {}), subtotal: Number(old.subtotal), lines: lines.rows.map(l => ({ vendorPartNumber: l.vendor_part_number, quantity: Number(l.quantity), unitPrice: Number(l.unit_price) })) });
-  return { orderId: old.id as string, conflicts: disagreements(stored, order) };
+  // Separate emails may omit the order date (receipts print an invoice date).
+  // Only duplicate detection tolerates absence; model/parser comparisons remain strict.
+  return { orderId: old.id as string, conflicts: disagreements(stored, order).filter(reason => reason !== 'Order dates differ' || !!(stored.orderDate && order.orderDate)) };
 }
 async function recordOrder(db: DatabaseHandle, client: PoolClient, vendor: string, order: Extraction, messageId: string, rawText: string, run: ToolRunContext, reviewItemId?: string) {
   await lock(client, JSON.stringify(['order', vendor, order.orderNumber.toLowerCase()]));
@@ -165,7 +167,9 @@ export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: T
       }
       const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
-      if (!parser) reasons.push(...independent(input, selected).reasons);
+      // A matching parser may have refused this layout. Without a saved
+      // extraction it provides no verification, so require a second model.
+      if (!parser || !item.parser_extraction) reasons.push(...independent(input, selected).reasons);
       if (item.vendor === 'unknown') reasons.push('Reject and resubmit with an explicit vendor');
       if (['mcmaster','sendcutsend'].includes(item.vendor) && !enabled.includes(item.vendor)) reasons.push('Vendor parser is disabled');
       if (reasons.length) throw new InputError(`Cannot resolve: ${reasons.join('; ')}.`);

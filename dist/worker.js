@@ -43159,7 +43159,7 @@ async function previousOrder(client, vendor, order) {
   if (!old) return void 0;
   const lines = await client.query(`SELECT p.vendor_part_number, l.quantity, l.unit_price FROM order_lines l JOIN parts p ON p.id=l.part_id WHERE l.order_id=$1 ORDER BY l.line_number`, [old.id]);
   const stored = extraction({ orderNumber: old.vendor_order_number, ...old.order_date ? { orderDate: old.order_date } : {}, subtotal: Number(old.subtotal), lines: lines.rows.map((l) => ({ vendorPartNumber: l.vendor_part_number, quantity: Number(l.quantity), unitPrice: Number(l.unit_price) })) });
-  return { orderId: old.id, conflicts: disagreements(stored, order) };
+  return { orderId: old.id, conflicts: disagreements(stored, order).filter((reason) => reason !== "Order dates differ" || !!(stored.orderDate && order.orderDate)) };
 }
 async function recordOrder(db, client, vendor, order, messageId, rawText, run, reviewItemId) {
   await lock(client, JSON.stringify(["order", vendor, order.orderNumber.toLowerCase()]));
@@ -43290,7 +43290,7 @@ async function resolveReviewItem(ctx, raw, run) {
       }
       const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
-      if (!parser) reasons.push(...independent(input2, selected).reasons);
+      if (!parser || !item.parser_extraction) reasons.push(...independent(input2, selected).reasons);
       if (item.vendor === "unknown") reasons.push("Reject and resubmit with an explicit vendor");
       if (["mcmaster", "sendcutsend"].includes(item.vendor) && !enabled.includes(item.vendor)) reasons.push("Vendor parser is disabled");
       if (reasons.length) throw new InputError(`Cannot resolve: ${reasons.join("; ")}.`);

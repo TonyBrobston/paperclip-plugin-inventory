@@ -163,6 +163,48 @@ integration('verified email intake through the host harness', () => {
     const order = await exec(t,'SELECT vendor,vendor_order_number,subtotal::float8 AS subtotal FROM orders');
     expect(order[0]).toMatchObject({vendor:'mcmaster', vendor_order_number:'1014ASAMPLE', subtotal:9});
   });
+  it.each([
+    ['mcmaster-confirmation', 'mcmaster-receipt'],
+    ['mcmaster-receipt', 'mcmaster-confirmation'],
+  ])('deduplicates %s followed by %s without inventing a date', async (first, second) => {
+    const send = (name: string) => {
+      const text = layout(name);
+      return submit({messageId:name,rawText:text,agentExtraction:selectParser(text)!.parse(text)});
+    };
+    const recorded = await send(first);
+    const duplicate = await send(second);
+    expect(duplicate.error).toBeUndefined();
+    expect(duplicate.data).toMatchObject({status:'recorded',orderId:recorded.data?.orderId,duplicate:true});
+    expect(await count('orders')).toBe(1);
+    expect(await count('ledger_entries')).toBe(3);
+    expect(await count('review_queue')).toBe(0);
+    const stored = await exec(t,'SELECT order_date::text FROM orders');
+    expect(stored[0]!.order_date).toBe(first === 'mcmaster-confirmation' ? '2026-10-14' : null);
+  });
+  it('still queues conflicting known dates for an existing order', async () => {
+    const text = layout('mcmaster-confirmation');
+    await submit({rawText:text,agentExtraction:selectParser(text)!.parse(text)});
+    const changed = text.replace('10/14/2026','10/15/2026');
+    const result = await submit({messageId:'date-conflict',rawText:changed,agentExtraction:selectParser(changed)!.parse(changed)});
+    expect(result.data?.status).toBe('open');
+    expect(await count('ledger_entries')).toBe(3);
+  });
+  it.each(['accept', 'accept_with_corrections'])('requires independent verification for parser-refused %s', async resolution => {
+    const text = layout('sendcutsend-order');
+    const selected = {orderNumber:'SX00A000',subtotal:9,lines:[{vendorPartNumber:'SX-PART-1',quantity:3,unitPrice:3}]};
+    const queued = await submit({rawText:text,agentExtraction:selected});
+    const params = {resolution,corrections:selected,agentModel:'model-a'};
+    const id = queued.data?.reviewItemId;
+    expect((await resolve(id,params)).error).toContain('independent');
+    expect((await resolve(id,{...params,independentExtraction:{model:'model-a',extractionId:'run-b',extraction:selected}})).error).toContain('different model');
+    const wrong = {...selected,subtotal:12,lines:[{...selected.lines[0],quantity:4}]};
+    expect((await resolve(id,{...params,independentExtraction:{model:'model-b',extractionId:'run-b',extraction:wrong}})).error).toContain('differ');
+    expect(await count('ledger_entries')).toBe(0);
+    expect((await resolve(id,{...params,independentExtraction:{model:'model-b',extractionId:'run-b',extraction:selected}})).error).toBeUndefined();
+    expect(await count('ledger_entries')).toBe(1);
+    const rows = await exec(t,'SELECT resolution_provenance FROM review_queue');
+    expect(rows[0]!.resolution_provenance).toMatchObject({independentExtraction:{model:'model-b'}});
+  });
   it('holds a real SendCutSend order email in review and records why', async () => {
     const text = layout('sendcutsend-order');
     const result = await call('submit_order_email', {messageId:'real-sendcutsend', rawText:text, agentExtraction:{orderNumber:'SX00A000', subtotal:9, lines:[{vendorPartNumber:'SX-PART-1', quantity:3, unitPrice:3}]}});
