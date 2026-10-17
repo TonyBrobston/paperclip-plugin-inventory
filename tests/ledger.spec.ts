@@ -149,6 +149,7 @@ integration("the ledger", () => {
         "0008_part_stock",
         "0009_intake",
         "0010_review_disposition",
+        "0011_sheet_sync",
       ]);
     });
   });
@@ -619,7 +620,7 @@ integration("the ledger", () => {
 
     it("refuses a truncate, which fires no row triggers at all", async () => {
       await receipt(5, "PO-1");
-      await expect(exec(t, "TRUNCATE ledger_entries")).rejects.toThrow(/append-only; TRUNCATE/);
+      await expect(exec(t, "TRUNCATE ledger_entries CASCADE")).rejects.toThrow(/append-only; TRUNCATE/);
     });
 
     it("leaves the row intact after a refused update", async () => {

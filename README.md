@@ -11,10 +11,7 @@ parts, and gives agents the tools to keep it current: order emails in, sales
 out, a Google Sheet as the human-facing view, and a review queue for anything
 the plugin could not verify.
 
-**Status: the ledger works.** `record_receipt`, `record_adjustment` and
-`get_stock` are implemented against the schema in `migrations/`. The other
-eight tools are declared and registered but arrive over phases 3–6; calling
-one today returns the phase it is waiting on.
+**Status:** ledger, verified email intake, review resolution and `sync_sheet` are implemented. BOM and BigCommerce handlers arrive in phases 5–6. See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) before configuring sync.
 
 ## The ledger
 

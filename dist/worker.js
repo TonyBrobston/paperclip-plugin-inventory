@@ -687,8 +687,8 @@ function assert(_) {
 }
 function getEnumValues(entries2) {
   const numericValues = Object.values(entries2).filter((v) => typeof v === "number");
-  const values = Object.entries(entries2).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
-  return values;
+  const values2 = Object.entries(entries2).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
+  return values2;
 }
 function joinValues(array2, separator = "|") {
   return array2.map((val) => stringifyPrimitive(val)).join(separator);
@@ -3882,10 +3882,10 @@ function getDiscriminatedOption(union2, value) {
 function discriminatorMap(def2) {
   const map2 = /* @__PURE__ */ new Map();
   for (const option of def2.options) {
-    const values = option._zod.propValues?.[def2.discriminator];
-    if (!values || values.size === 0)
+    const values2 = option._zod.propValues?.[def2.discriminator];
+    if (!values2 || values2.size === 0)
       throw new Error(`Invalid discriminated union option at index "${def2.options.indexOf(option)}"`);
-    for (const value of values) {
+    for (const value of values2) {
       if (map2.has(value)) {
         if (value !== void 0)
           throw new Error(`Duplicate discriminator value "${String(value)}"`);
@@ -4215,11 +4215,11 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def2) => {
       return payload;
     }
     const proms = [];
-    const values = def2.keyType._zod.values;
-    if (values && !def2.partial) {
+    const values2 = def2.keyType._zod.values;
+    if (values2 && !def2.partial) {
       payload.value = memo2 ? memo2.alloc(inst, payload, {}, ctx) : {};
       const recordKeys = /* @__PURE__ */ new Set();
-      for (const key of values) {
+      for (const key of values2) {
         if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
           recordKeys.add(typeof key === "number" ? key.toString() : key);
           if (key === "__proto__")
@@ -4305,7 +4305,7 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def2) => {
         if (keyResult.issues.length) {
           if (def2.mode === "loose") {
             payload.value[key] = input2[key];
-          } else if (values) {
+          } else if (values2) {
             unrecognized = unrecognized ?? [];
             unrecognized.push(key);
           } else {
@@ -4470,8 +4470,8 @@ function handleSetResult(result, final) {
 }
 var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
   $ZodType.init(inst, def2);
-  const values = getEnumValues(def2.entries);
-  const valuesSet = new Set(values);
+  const values2 = getEnumValues(def2.entries);
+  const valuesSet = new Set(values2);
   inst._zod.values = valuesSet;
   defineLazyInternal(inst, "pattern", (zod) => {
     const patternValues = getEnumValues(zod.def.entries).filter((k) => propertyKeyTypes.has(typeof k));
@@ -4484,7 +4484,7 @@ var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
     }
     payload.issues.push({
       code: "invalid_value",
-      values,
+      values: values2,
       input: input2,
       inst
     });
@@ -4493,15 +4493,15 @@ var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
 });
 var $ZodLiteral = /* @__PURE__ */ $constructor("$ZodLiteral", (inst, def2) => {
   $ZodType.init(inst, def2);
-  const values = new Set(def2.values);
-  inst._zod.values = values;
+  const values2 = new Set(def2.values);
+  inst._zod.values = values2;
   defineLazyInternal(inst, "pattern", (zod) => {
     const vals = zod.def.values;
     return new RegExp(vals.length ? `^(${vals.map((o) => typeof o === "string" ? escapeRegex(o) : o ? escapeRegex(o.toString()) : String(o)).join("|")})$` : "^[^\\s\\S]$");
   });
   inst._zod.parse = (payload, _ctx) => {
     const input2 = payload.value;
-    if (values.has(input2)) {
+    if (values2.has(input2)) {
       return payload;
     }
     payload.issues.push({
@@ -4560,8 +4560,8 @@ var $ZodOptional = /* @__PURE__ */ $constructor("$ZodOptional", (inst, def2) => 
   defineLazyInternal(inst, "optin", (zod) => zod.def.innerType._zod.optin === "defaulted" ? "defaulted" : "optional");
   inst._zod.optout = "optional";
   defineLazyInternal(inst, "values", (zod) => {
-    const values = zod.def.innerType._zod.values;
-    return values ? /* @__PURE__ */ new Set([...values, void 0]) : void 0;
+    const values2 = zod.def.innerType._zod.values;
+    return values2 ? /* @__PURE__ */ new Set([...values2, void 0]) : void 0;
   });
   defineLazyInternal(inst, "pattern", (zod) => {
     const pattern = zod.def.innerType._zod.pattern;
@@ -9359,8 +9359,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text3) => {
-  return text3.charAt(0).toUpperCase() + text3.slice(1);
+var capitalizeFirstCharacter = (text4) => {
+  return text4.charAt(0).toUpperCase() + text4.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -14017,15 +14017,15 @@ function generateArrayCheck(doc, ctx, schema, accessor, buildsValue = true) {
 }
 function generateLiteralCheck(doc, ctx, schema, accessor) {
   const def2 = schema._zod.def;
-  const values = def2.values;
-  if (values.length !== 1) {
-    const literalSet = addConstant(ctx, new Set(values));
+  const values2 = def2.values;
+  if (values2.length !== 1) {
+    const literalSet = addConstant(ctx, new Set(values2));
     doc.write(`if (!${literalSet}.has(${accessor})) return INVALID;`);
     return accessor;
   }
-  const value = values[0];
+  const value = values2[0];
   if (typeof value === "number" && Number.isNaN(value)) {
-    const literalSet = addConstant(ctx, new Set(values));
+    const literalSet = addConstant(ctx, new Set(values2));
     doc.write(`if (!${literalSet}.has(${accessor})) return INVALID;`);
     return accessor;
   }
@@ -14045,11 +14045,11 @@ function generateLiteralCheck(doc, ctx, schema, accessor) {
   return accessor;
 }
 function generateEnumCheck(doc, ctx, schema, accessor) {
-  const values = schema._zod.values;
-  if (!values) {
+  const values2 = schema._zod.values;
+  if (!values2) {
     throw new ZodCompileUnsupportedError("enum schema without enumerated values");
   }
-  const enumSet = addConstant(ctx, values);
+  const enumSet = addConstant(ctx, values2);
   doc.write(`if (!${enumSet}.has(${accessor})) return INVALID;`);
   return accessor;
 }
@@ -14198,8 +14198,8 @@ function generateUnionCheck(doc, ctx, schema, accessor) {
   }
   const allLiterals = options.every((opt) => opt._zod.def.type === "literal" && !opt._zod.def.checks?.length);
   if (allLiterals) {
-    const values = new Set(options.flatMap((opt) => opt._zod.def.values));
-    const valuesConst = addConstant(ctx, values);
+    const values2 = new Set(options.flatMap((opt) => opt._zod.def.values));
+    const valuesConst = addConstant(ctx, values2);
     doc.write(`if (!${valuesConst}.has(${accessor})) return INVALID;`);
     return accessor;
   }
@@ -14236,17 +14236,17 @@ function generateDiscriminatedUnionCheck(doc, ctx, def2, accessor) {
   let firstBranch = true;
   const claimed = /* @__PURE__ */ new Set();
   for (const option of def2.options) {
-    const values = option._zod.propValues?.[def2.discriminator];
-    if (!values || values.size === 0) {
+    const values2 = option._zod.propValues?.[def2.discriminator];
+    if (!values2 || values2.size === 0) {
       throw new ZodCompileUnsupportedError("discriminated union option without static discriminator values");
     }
-    for (const value of values) {
+    for (const value of values2) {
       if (claimed.has(value)) {
         throw new ZodCompileUnsupportedError(`duplicate discriminator value ${String(value)}`);
       }
       claimed.add(value);
     }
-    const conditions = Array.from(values, (value) => literalEquality(ctx, discVar, value));
+    const conditions = Array.from(values2, (value) => literalEquality(ctx, discVar, value));
     const prefix = firstBranch ? "if" : "else if";
     doc.write(`${prefix} (${conditions.join(" || ")}) {`);
     doc.indented((d) => {
@@ -15348,8 +15348,8 @@ function _set(Class2, valueType, params2) {
   });
 }
 // @__NO_SIDE_EFFECTS__
-function _enum(Class2, values, params2) {
-  const entries2 = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
+function _enum(Class2, values2, params2) {
+  const entries2 = Array.isArray(values2) ? Object.fromEntries(values2.map((v) => [v, v])) : values2;
   return new Class2({
     type: "enum",
     entries: entries2,
@@ -16362,16 +16362,16 @@ var dateProcessor = (schema, ctx, json2, params2) => {
 };
 var enumProcessor = (schema, _ctx, json2, _params) => {
   const def2 = schema._zod.def;
-  const values = getEnumValues(def2.entries);
-  if (values.length === 0) {
+  const values2 = getEnumValues(def2.entries);
+  if (values2.length === 0) {
     json2.not = {};
     return;
   }
-  if (values.every((v) => typeof v === "number"))
+  if (values2.every((v) => typeof v === "number"))
     json2.type = "number";
-  if (values.every((v) => typeof v === "string"))
+  if (values2.every((v) => typeof v === "string"))
     json2.type = "string";
-  json2.enum = values;
+  json2.enum = values2;
 };
 var literalProcessor = (schema, ctx, json2, params2) => {
   const def2 = schema._zod.def;
@@ -16639,8 +16639,8 @@ function stringifyKeyNames(bySchema, json2, visited) {
   }
   const types = Array.isArray(json2.type) ? json2.type : [json2.type];
   const numericType = !types.includes("string") && types.some((t) => t === "number" || t === "integer");
-  const values = json2.enum ?? (json2.const !== void 0 ? [json2.const] : void 0);
-  if (!numericType && !values?.some((v) => typeof v === "number"))
+  const values2 = json2.enum ?? (json2.const !== void 0 ? [json2.const] : void 0);
+  if (!numericType && !values2?.some((v) => typeof v === "number"))
     return json2;
   const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf, format, id, ...rest } = json2;
   if (rest.enum)
@@ -16650,7 +16650,7 @@ function stringifyKeyNames(bySchema, json2, visited) {
   if (!numericType)
     return rest;
   rest.type = "string";
-  if (!values)
+  if (!values2)
     rest.pattern = (types.includes("number") ? number : integer).source;
   return rest;
 }
@@ -18311,9 +18311,9 @@ var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
   inst.enum = def2.entries;
   inst.options = [...inst._zod.values];
   const keys = new Set(Object.keys(def2.entries));
-  inst.extract = (values, params2) => {
+  inst.extract = (values2, params2) => {
     const newEntries = {};
-    for (const value of values) {
+    for (const value of values2) {
       if (keys.has(value)) {
         newEntries[value] = def2.entries[value];
       } else
@@ -18326,9 +18326,9 @@ var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
       entries: newEntries
     });
   };
-  inst.exclude = (values, params2) => {
+  inst.exclude = (values2, params2) => {
     const newEntries = { ...def2.entries };
-    for (const value of values) {
+    for (const value of values2) {
       if (keys.has(value)) {
         delete newEntries[value];
       } else
@@ -18342,8 +18342,8 @@ var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
     });
   };
 });
-function _enum2(values, params2) {
-  const entries2 = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
+function _enum2(values2, params2) {
+  const entries2 = Array.isArray(values2) ? Object.fromEntries(values2.map((v) => [v, v])) : values2;
   return new ZodEnum({
     type: "enum",
     entries: entries2,
@@ -28162,12 +28162,12 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
   const raw = firstQueryValue(value);
   if (raw === void 0 || raw === null || raw === "")
     return fallback;
-  const text3 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
-  if (!/^-?\d+$/.test(text3)) {
+  const text4 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!/^-?\d+$/.test(text4)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be an integer` });
     return fallback;
   }
-  const numeric = Number.parseInt(text3, 10);
+  const numeric = Number.parseInt(text4, 10);
   if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
     const range = min === 0 ? `between 0 and ${max}` : `between ${min} and ${max}`;
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be ${range}` });
@@ -28177,7 +28177,7 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
 }
 function parseEnumList(value, ctx, field2, allowed) {
   const allowedSet = new Set(allowed);
-  const values = [];
+  const values2 = [];
   for (const rawEntry of queryValues(value)) {
     if (typeof rawEntry !== "string") {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be a comma-separated string` });
@@ -28191,11 +28191,11 @@ function parseEnumList(value, ctx, field2, allowed) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} contains an unsupported value` });
         continue;
       }
-      if (!values.includes(item))
-        values.push(item);
+      if (!values2.includes(item))
+        values2.push(item);
     }
   }
-  return values;
+  return values2;
 }
 function parseOptionalUuid(value, ctx, field2) {
   const normalized = parseOptionalString(value, ctx, field2);
@@ -35586,7 +35586,7 @@ var SKILL_POLICY_SOURCE_TYPES = [
 var skillPolicyActionSchema = external_exports.enum(SKILL_POLICY_ACTIONS);
 var skillPolicySourceTypeSchema = external_exports.enum(SKILL_POLICY_SOURCE_TYPES);
 var skillPolicyEffectSchema = external_exports.enum(["allow", "deny"]);
-var nonEmptyUniqueStrings = external_exports.array(external_exports.string().trim().min(1).max(512)).min(1).max(500).refine((values) => new Set(values).size === values.length, "Values must be unique");
+var nonEmptyUniqueStrings = external_exports.array(external_exports.string().trim().min(1).max(512)).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Values must be unique");
 function isSafeSourceLocator(value) {
   if (/:\/\/[^/@\s]+:[^/@\s]+@/.test(value))
     return false;
@@ -35628,22 +35628,22 @@ var skillPolicySubjectSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("all_agents") }).strict(),
   external_exports.object({
     type: external_exports.literal("agents"),
-    agentIds: external_exports.array(external_exports.string().guid()).min(1).max(500).refine((values) => new Set(values).size === values.length, "Agent IDs must be unique")
+    agentIds: external_exports.array(external_exports.string().guid()).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Agent IDs must be unique")
   }).strict(),
   external_exports.object({ type: external_exports.literal("roles"), roles: nonEmptyUniqueStrings }).strict()
 ]);
 var skillPolicyResourceSelectorSchema = external_exports.object({
   skillIds: external_exports.array(external_exports.string().guid()).min(1).max(500).optional(),
   skillKeys: nonEmptyUniqueStrings.optional(),
-  sourceTypes: external_exports.array(skillPolicySourceTypeSchema).min(1).refine((values) => new Set(values).size === values.length, "Source types must be unique").optional(),
-  sourceLocators: external_exports.array(skillPolicySourceLocatorSchema).min(1).max(500).refine((values) => new Set(values).size === values.length, "Source locators must be unique").optional()
+  sourceTypes: external_exports.array(skillPolicySourceTypeSchema).min(1).refine((values2) => new Set(values2).size === values2.length, "Source types must be unique").optional(),
+  sourceLocators: external_exports.array(skillPolicySourceLocatorSchema).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Source locators must be unique").optional()
 }).strict().refine((value) => Object.keys(value).length > 0, "At least one resource selector is required");
 var skillPolicyRuleSchema = external_exports.object({
   id: external_exports.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/),
   priority: external_exports.number().int().min(-1e6).max(1e6),
   effect: skillPolicyEffectSchema,
   subject: skillPolicySubjectSchema,
-  actions: external_exports.array(skillPolicyActionSchema).min(1).refine((values) => new Set(values).size === values.length, "Actions must be unique"),
+  actions: external_exports.array(skillPolicyActionSchema).min(1).refine((values2) => new Set(values2).size === values2.length, "Actions must be unique"),
   resources: skillPolicyResourceSelectorSchema.optional()
 }).strict();
 var skillPolicyDocumentSchema = external_exports.object({
@@ -42758,9 +42758,9 @@ function optionalText(value, label2) {
   return trimmed;
 }
 function requiredText(value, label2) {
-  const text3 = optionalText(value, label2);
-  if (text3 === void 0) throw new InputError(`${label2} is required.`);
-  return text3;
+  const text4 = optionalText(value, label2);
+  if (text4 === void 0) throw new InputError(`${label2} is required.`);
+  return text4;
 }
 function provenanceOf(tool3, runCtx, extra) {
   return {
@@ -43025,8 +43025,8 @@ function partLink(raw) {
   return matched ? { vendorPartNumber: matched[2], description: matched[1].trim() } : void 0;
 }
 function describe3(description, packSize) {
-  const text3 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
-  return text3 ? text3 : void 0;
+  const text4 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
+  return text4 ? text4 : void 0;
 }
 function merchandise(raw) {
   const matched = /^\|(?:\s*\|)*\s*Merchandise\s*\|\s*(\$?[\d,]+\.\d{2,4})\s*\|$/mi.exec(raw);
@@ -43303,6 +43303,293 @@ async function resolveReviewItem(ctx, raw, run) {
     return { reviewItemId: id, status, orderId, duplicate: false };
   });
   return { content: `Review item ${result.status}.`, data: result };
+}
+
+// src/sheets-client.ts
+import { createSign } from "node:crypto";
+var SheetError = class extends OperatorFacingError {
+};
+function parseSheetSettings(config2) {
+  const id = config2.spreadsheetId;
+  if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{10,200}$/.test(id)) {
+    throw new ConfigError("Configure the inventory spreadsheet ID from private settings before running sync_sheet.");
+  }
+  if (!isSecretRefBinding(config2.googleServiceAccount)) {
+    throw new ConfigError("Select a Paperclip secret containing the Google service-account JSON key. Share the spreadsheet with that service account as an editor.");
+  }
+  return { spreadsheetId: id, serviceAccount: config2.googleServiceAccount };
+}
+async function googleSheetsClient(ctx, companyId, settings) {
+  const raw = await ctx.secrets.resolve(settings.serviceAccount, { companyId, configPath: "googleServiceAccount" });
+  let key;
+  try {
+    key = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("The Google service-account secret must contain a JSON key.");
+  }
+  if (!key || typeof key !== "object" || key.type !== "service_account" || typeof key.client_email !== "string" || !key.client_email.includes("@") || typeof key.private_key !== "string") {
+    throw new ConfigError("The Google service-account secret is missing its account identity or private key.");
+  }
+  const now = Math.floor(Date.now() / 1e3);
+  const encode3 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const unsigned = `${encode3({ alg: "RS256", typ: "JWT" })}.${encode3({ iss: key.client_email, scope: "https://www.googleapis.com/auth/spreadsheets", aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 })}`;
+  let assertion;
+  try {
+    assertion = `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(key.private_key, "base64url")}`;
+  } catch {
+    throw new ConfigError("The Google service-account private key could not sign a request.");
+  }
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    signal: AbortSignal.timeout(3e4),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion })
+  });
+  if (!tokenResponse.ok) throw new SheetError("Google rejected the service-account credentials. Check the Paperclip secret.");
+  const token = await tokenResponse.json();
+  if (!token.access_token) throw new SheetError("Google did not return a service-account access token.");
+  const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}`;
+  const request = async (url2, body) => {
+    const response = await fetch(url2, {
+      method: body ? "POST" : "GET",
+      signal: AbortSignal.timeout(3e4),
+      headers: { Authorization: `Bearer ${token.access_token}`, "Content-Type": "application/json" },
+      ...body ? { body: JSON.stringify(body) } : {}
+    });
+    if (!response.ok) throw new SheetError(`Google Sheets request failed (HTTP ${response.status}). Check sharing, protected-range permissions and API access; rerun sync_sheet safely after fixing it.`);
+    return response.json();
+  };
+  return {
+    email: key.client_email,
+    read: async () => await request(`${base}?includeGridData=true`),
+    batch: async (requests) => {
+      if (requests.length) await request(`${base}:batchUpdate`, { requests });
+    }
+  };
+}
+function writeCells(sheetId, row, column, values2) {
+  return { updateCells: { start: { sheetId, rowIndex: row, columnIndex: column }, fields: "userEnteredValue", rows: values2.map((cells2) => ({ values: cells2.map((value) => ({ userEnteredValue: typeof value === "number" ? { numberValue: value } : typeof value === "boolean" ? { boolValue: value } : { stringValue: value } })) })) } };
+}
+function gridRows(tab) {
+  const rows = [];
+  for (const block of tab.data ?? []) for (const [i, row] of (block.rowData ?? []).entries()) {
+    const index = (block.startRow ?? 0) + i;
+    rows[index] ??= [];
+    for (const [j, cell] of (row.values ?? []).entries()) rows[index][(block.startColumn ?? 0) + j] = cell;
+  }
+  return rows;
+}
+function cellValue(cell) {
+  const value = cell?.effectiveValue ?? cell?.userEnteredValue;
+  if (value && "errorValue" in value) throw new SheetError("A spreadsheet cell contains an error. Fix it before syncing.");
+  return value?.stringValue ?? value?.numberValue ?? value?.boolValue;
+}
+
+// src/sheet-sync.ts
+var INVENTORY_HEADERS = ["Part ID", "Part", "Description", "Unit", "On hand", "Committed", "On order", "Sellable impact", "Last cost", "Avg cost", "Last ordered", "Reorder point", "Target qty", "Location", "Notes", "Active"];
+var ADJUSTMENT_HEADERS = ["Count ID", "Part ID", "Physical count", "Reason", "Counted at", "Counted by", "Processed at", "Result"];
+var REVIEW_HEADERS = ["Review ID", "Vendor", "Message ID", "Reason", "Parser extraction", "Agent extraction", "Created at"];
+var MANAGED = "inventory-plugin:";
+var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function text3(value, label2, max = 500) {
+  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new SheetError(`${label2} must be nonblank text (at most ${max} characters).`);
+  return value.trim();
+}
+function values(row = []) {
+  return row.map(cellValue);
+}
+function populated(row = []) {
+  return row.some((cell) => cellValue(cell) !== void 0 && cellValue(cell) !== "");
+}
+function validateHeader(tab, expected) {
+  const rows = gridRows(tab);
+  if (!rows.some(populated)) return;
+  if (expected.some((label2, i) => cellValue(rows[0]?.[i]) !== label2)) {
+    throw new SheetError(`${tab.properties.title} has unexpected columns. Restore the documented header order; no cells or ledger entries were changed.`);
+  }
+}
+function validateInputCells(row, label2) {
+  if (row.some((cell) => cell?.userEnteredValue?.formulaValue !== void 0)) throw new SheetError(`${label2} contains formulas. Enter literal values before syncing.`);
+}
+function parseCounts(rows) {
+  const counts = [];
+  const ids = /* @__PURE__ */ new Set();
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] ?? [];
+    if (!populated(row.slice(0, 6))) continue;
+    validateInputCells(row.slice(0, 6), `Adjustments row ${i + 1}`);
+    const cells2 = values(row);
+    const id = text3(cells2[0], `Adjustments row ${i + 1} Count ID`, 100);
+    if (ids.has(id)) throw new SheetError(`Duplicate Count ID in Adjustments row ${i + 1}. Give each physical count a unique ID.`);
+    ids.add(id);
+    const partId = text3(cells2[1], `Adjustments row ${i + 1} Part ID`).toLowerCase();
+    if (!UUID2.test(partId)) throw new SheetError(`Adjustments row ${i + 1} requires the Inventory Part ID.`);
+    const count = parseQuantity(cells2[2], { label: `Adjustments row ${i + 1} physical count` });
+    if (count < 0) throw new SheetError("Physical counts cannot be negative.");
+    const countedAt = text3(cells2[4], `Adjustments row ${i + 1} Counted at`);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(countedAt) || !Number.isFinite(Date.parse(countedAt))) throw new SheetError(`Adjustments row ${i + 1} Counted at must be an ISO timestamp with a time zone.`);
+    counts.push({ row: i, id, partId, count, reason: text3(cells2[3], `Adjustments row ${i + 1} Count reason`), countedAt, countedBy: text3(cells2[5], `Adjustments row ${i + 1} Counted by`) });
+  }
+  return counts;
+}
+function settingsOf(row) {
+  validateInputCells(row.slice(11, 16), "Inventory human settings");
+  const cells2 = values(row);
+  const result = {};
+  for (const [offset, name] of ["reorderPoint", "targetQty", "location", "notes", "active"].entries()) {
+    const value = cells2[11 + offset];
+    if (value === void 0 || value === "") {
+      result[name] = null;
+      continue;
+    }
+    if (offset < 2) {
+      const qty = parseQuantity(value, { label: name });
+      if (qty < 0) throw new SheetError(`${name} cannot be negative.`);
+      result[name] = qty;
+    } else if (offset === 4) {
+      if (typeof value !== "boolean") throw new SheetError("Active must be a checkbox boolean.");
+      result[name] = value;
+    } else result[name] = text3(value, name, 5e3);
+  }
+  return result;
+}
+function protect(tab, suffix, range, email3) {
+  const description = MANAGED + suffix;
+  const existing = tab.protectedRanges?.find((p) => p.description === description);
+  const protectedRange = { description, range: { sheetId: tab.properties.sheetId, ...range }, warningOnly: false, editors: { users: [email3], domainUsersCanEdit: false } };
+  return existing ? { updateProtectedRange: { protectedRange: { ...protectedRange, protectedRangeId: existing.protectedRangeId }, fields: "range,description,warningOnly,editors" } } : { addProtectedRange: { protectedRange } };
+}
+function ensureSize(tab, rows, columns) {
+  const grid = tab.properties.gridProperties;
+  if (grid.rowCount >= rows && grid.columnCount >= columns) return [];
+  return [{ updateSheetProperties: { properties: { sheetId: tab.properties.sheetId, gridProperties: { rowCount: Math.max(grid.rowCount, rows), columnCount: Math.max(grid.columnCount, columns) } }, fields: "gridProperties.rowCount,gridProperties.columnCount" } }];
+}
+async function applyCount(db, client, spreadsheetId, count, run, dryRun) {
+  const prior = (await client.query("SELECT * FROM sheet_counts WHERE spreadsheet_id=$1 AND count_id=$2", [spreadsheetId, count.id])).rows[0];
+  if (prior) {
+    if (prior.part_id !== count.partId || toNumber(prior.physical_count) !== count.count || prior.reason !== count.reason || prior.counted_at !== count.countedAt || prior.counted_by !== count.countedBy) throw new SheetError(`Count ID ${count.id} was already processed with different inputs. Add a new Count ID to correct it.`);
+    return { ...count, delta: toNumber(prior.delta), processedAt: prior.processed_at.toISOString(), duplicate: true };
+  }
+  await client.query("SELECT id FROM parts WHERE id=$1 FOR UPDATE", [count.partId]);
+  const stock = (await client.query("SELECT on_hand FROM part_stock WHERE part_id=$1", [count.partId])).rows[0];
+  if (!stock) throw new SheetError(`Count ID ${count.id} names an unknown part.`);
+  const before = toNumber(stock.on_hand);
+  const delta = parseQuantity(Math.round((count.count - before) * 1e4) / 1e4, { label: "Physical-count adjustment" });
+  let entryId = null;
+  if (!dryRun && delta !== 0) {
+    const entry = await appendEntry(db, {
+      part: { kind: "id", id: count.partId },
+      entryType: "adjustment",
+      quantity: delta,
+      reference: `sheet-count:${count.id}`,
+      idempotencyScope: ["sheet-count", spreadsheetId],
+      note: count.reason,
+      createdBy: run.agentId,
+      provenance: { source: "sync_sheet", companyId: run.companyId, agentId: run.agentId, runId: run.runId, spreadsheetId, countId: count.id, physicalCount: count.count, beforeCount: before, countedAt: count.countedAt, countedBy: count.countedBy }
+    }, client);
+    entryId = entry.entry.id;
+  }
+  const processedAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (!dryRun) await client.query(`INSERT INTO sheet_counts (spreadsheet_id,count_id,part_id,physical_count,reason,counted_at,counted_by,before_count,delta,ledger_entry_id,processed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [spreadsheetId, count.id, count.partId, count.count, count.reason, count.countedAt, count.countedBy, before, delta, entryId, processedAt]);
+  return { ...count, delta, processedAt, duplicate: false };
+}
+async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) {
+  const lock2 = await db.pool.connect();
+  const lockKey = JSON.stringify(["inventory-sheet", db.schema, spreadsheetId]);
+  try {
+    await lock2.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+    const snapshot = await sheets.read();
+    const requests = [];
+    let nextId = Math.max(0, ...snapshot.sheets.map((t) => t.properties.sheetId)) + 1;
+    const tab = (title, headers) => {
+      const existing = snapshot.sheets.find((t) => t.properties.title === title);
+      if (existing) {
+        validateHeader(existing, headers);
+        return existing;
+      }
+      const created = { properties: { sheetId: nextId++, title, gridProperties: { rowCount: 1e3, columnCount: Math.max(26, headers.length) } } };
+      requests.push({ addSheet: { properties: created.properties } });
+      return created;
+    };
+    const inventory = tab("Inventory", INVENTORY_HEADERS);
+    const adjustments = tab("Adjustments", ADJUSTMENT_HEADERS);
+    const review = tab("Needs Review", REVIEW_HEADERS);
+    const inventoryRows = gridRows(inventory);
+    const counts = parseCounts(gridRows(adjustments));
+    const rowMap = /* @__PURE__ */ new Map();
+    const settings = /* @__PURE__ */ new Map();
+    for (let i = 1; i < inventoryRows.length; i++) {
+      const row = inventoryRows[i] ?? [];
+      const rawId = cellValue(row[0]);
+      if (rawId === void 0 || rawId === "") {
+        if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
+        continue;
+      }
+      const id = text3(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
+      if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
+      rowMap.set(id, i);
+      settings.set(id, settingsOf(row));
+    }
+    const result = await db.transaction(async (client) => {
+      const known = new Set((await client.query("SELECT id FROM parts")).rows.map((p) => p.id));
+      for (const id of rowMap.keys()) if (!known.has(id)) throw new SheetError("Inventory contains an unknown Part ID. Restore its original ID before syncing.");
+      for (const count of counts) if (!known.has(count.partId)) throw new SheetError(`Count ID ${count.id} names an unknown part.`);
+      const partIds = [...new Set(counts.map((c) => c.partId))].sort();
+      for (const id of partIds) await client.query("SELECT id FROM parts WHERE id=$1 FOR UPDATE", [id]);
+      const processed = [];
+      for (const count of counts) processed.push(await applyCount(db, client, spreadsheetId, count, run, dryRun));
+      if (!dryRun) for (const [id, setting] of settings) await client.query(`INSERT INTO part_sheet_settings(spreadsheet_id,part_id,settings) VALUES ($1,$2,$3::jsonb) ON CONFLICT(spreadsheet_id,part_id) DO UPDATE SET settings=EXCLUDED.settings,synced_at=now()`, [spreadsheetId, id, JSON.stringify(setting)]);
+      const stock = (await client.query(`SELECT s.*, costs.last_cost, costs.avg_cost, costs.last_ordered FROM part_stock s LEFT JOIN LATERAL (
+        SELECT (array_agg(unit_cost ORDER BY created_at DESC,id DESC) FILTER (WHERE unit_cost IS NOT NULL))[1] AS last_cost,
+        SUM(quantity_delta*unit_cost) FILTER (WHERE entry_type='purchase' AND unit_cost IS NOT NULL) / NULLIF(SUM(quantity_delta) FILTER (WHERE entry_type='purchase' AND unit_cost IS NOT NULL),0) AS avg_cost,
+        MAX(created_at) FILTER (WHERE entry_type='purchase') AS last_ordered FROM ledger_entries WHERE part_id=s.part_id
+      ) costs ON true ORDER BY s.vendor,s.vendor_part_number`)).rows;
+      const reviews = (await client.query("SELECT id,vendor,source_message_id,reason,parser_extraction,agent_extraction,created_at FROM review_queue WHERE status='open' ORDER BY created_at,id")).rows;
+      return { processed, stock, reviews };
+    });
+    let nextRow = Math.max(1, inventoryRows.length);
+    for (const part of result.stock) {
+      const row = rowMap.get(part.part_id) ?? nextRow++;
+      rowMap.set(part.part_id, row);
+      requests.push(writeCells(inventory.properties.sheetId, row, 0, [[part.part_id, `${part.vendor}:${part.vendor_part_number}`, part.description ?? "", part.unit_of_measure, toNumber(part.on_hand), toNumber(part.committed), toNumber(part.on_order), "Pending BOM integration", part.last_cost === null ? "" : toNumber(part.last_cost), part.avg_cost === null ? "" : toNumber(part.avg_cost), part.last_ordered ? part.last_ordered.toISOString() : ""]]));
+    }
+    for (const count of result.processed) requests.push(writeCells(adjustments.properties.sheetId, count.row, 6, [[count.processedAt, `Processed: ${count.delta >= 0 ? "+" : ""}${count.delta}`]]));
+    const excerpt = (value) => {
+      const json2 = JSON.stringify(value);
+      return json2.length <= 49e3 ? json2 : json2.slice(0, 48900) + "\u2026 [truncated; use list_review_queue for the full extraction]";
+    };
+    const reviewValues = result.reviews.map((r) => [r.id, r.vendor ?? "", r.source_message_id ?? "", r.reason, r.parser_extraction ? excerpt(r.parser_extraction) : "", r.agent_extraction ? excerpt(r.agent_extraction) : "", r.created_at.toISOString()]);
+    const reviewLength = Math.max(reviewValues.length, gridRows(review).length - 1);
+    while (reviewValues.length < reviewLength) reviewValues.push(Array(REVIEW_HEADERS.length).fill(""));
+    if (reviewValues.length) requests.push(writeCells(review.properties.sheetId, 1, 0, reviewValues));
+    const sizes = [...ensureSize(inventory, nextRow, INVENTORY_HEADERS.length), ...ensureSize(adjustments, Math.max(2, gridRows(adjustments).length), ADJUSTMENT_HEADERS.length), ...ensureSize(review, reviewLength + 1, REVIEW_HEADERS.length)];
+    requests.splice(requests.filter((r) => "addSheet" in r).length, 0, ...sizes);
+    for (const [t, headers] of [[inventory, INVENTORY_HEADERS], [adjustments, ADJUSTMENT_HEADERS], [review, REVIEW_HEADERS]]) {
+      if (!gridRows(t).some(populated)) requests.push(writeCells(t.properties.sheetId, 0, 0, [[...headers]]));
+      requests.push(protect(t, `${t.properties.title}:header`, { startRowIndex: 0, endRowIndex: 1 }, sheets.email));
+    }
+    requests.push(protect(inventory, "Inventory:system", { startColumnIndex: 0, endColumnIndex: 11 }, sheets.email));
+    requests.push(protect(adjustments, "Adjustments:status", { startColumnIndex: 6, endColumnIndex: 8 }, sheets.email));
+    requests.push(protect(review, "Needs Review:system", { startColumnIndex: 0, endColumnIndex: REVIEW_HEADERS.length }, sheets.email));
+    if (!dryRun) await sheets.batch(requests);
+    return { dryRun, inventoryParts: result.stock.length, settingsRead: settings.size, countsProcessed: result.processed.filter((c) => !c.duplicate).length, countsReplayed: result.processed.filter((c) => c.duplicate).length, openReviews: result.reviews.length, sellableImpact: "Pending BOM integration" };
+  } finally {
+    try {
+      await lock2.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
+    } finally {
+      lock2.release();
+    }
+  }
+}
+async function syncSheet(ctx, params2, run) {
+  if (!params2 || typeof params2 !== "object" || Array.isArray(params2)) throw new InputError("sync_sheet parameters must be an object.");
+  const dryRun = params2.dryRun;
+  if (dryRun !== void 0 && typeof dryRun !== "boolean") throw new InputError("dryRun must be a boolean.");
+  const settings = parseSheetSettings(await ctx.config.get(run.companyId));
+  const db = await openStore(ctx, run.companyId);
+  const client = await googleSheetsClient(ctx, run.companyId, settings);
+  const data = await synchronizeSheet(db, client, settings.spreadsheetId, run, dryRun === true);
+  return { content: `${dryRun ? "Previewed" : "Synced"} inventory Sheet: ${data.inventoryParts} parts, ${data.countsProcessed} new counts, ${data.openReviews} open reviews. Sellable impact awaits BOM integration.`, data };
 }
 
 // src/tools.ts
@@ -43595,9 +43882,11 @@ function toolError(ctx, toolName, companyId, error62) {
   });
   return { error: message2, content: message2, data: { error: message2 } };
 }
-var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item"];
+var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet"];
 async function dispatch(ctx, declaration, params2, runCtx) {
   switch (declaration.name) {
+    case "sync_sheet":
+      return syncSheet(ctx, params2, runCtx);
     case "submit_order_email":
       return submitOrderEmail(ctx, params2, runCtx);
     case "list_review_queue":

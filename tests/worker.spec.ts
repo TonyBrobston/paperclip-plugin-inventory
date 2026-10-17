@@ -71,9 +71,9 @@ describe("tool registration", () => {
     // The flip side: a phase number left behind on a tool that now works.
     for (const declaration of TOOL_DECLARATIONS) {
       if ((IMPLEMENTED_TOOLS as readonly string[]).includes(declaration.name)) {
-        expect(declaration.phase, `${declaration.name} works, so its phase should be 2`).toBeLessThanOrEqual(3);
+        expect(declaration.phase, `${declaration.name} works, so its phase should be 2`).toBeLessThanOrEqual(4);
       } else {
-        expect(declaration.phase).toBeGreaterThan(3);
+        expect(declaration.phase).toBeGreaterThan(4);
       }
     }
   });
