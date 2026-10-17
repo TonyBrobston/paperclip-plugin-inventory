@@ -63,15 +63,16 @@ describe('Sheet boundary safety', () => {
     expect(() => parseSheetSettings({ spreadsheetId: sheetId, googleServiceAccount: 'private-key' })).toThrow(/Paperclip secret/);
     expect(parseSheetSettings({ spreadsheetId: sheetId, googleServiceAccount: { type: 'secret_ref', secretId: 'synthetic-key' } }).spreadsheetId).toBe(sheetId);
   });
-  it.each([
-    [11, { userEnteredValue: { numberValue: -1 } }, 'reorderPoint cannot be negative'],
-    [12, { userEnteredValue: { numberValue: -1 } }, 'targetQty cannot be negative'],
-    [11, { userEnteredValue: { stringValue: 'invalid' } }, 'reorderPoint'],
-    [15, { userEnteredValue: { stringValue: 'yes' } }, 'active must be a checkbox boolean'],
-    [13, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'location'],
-    [14, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'notes'],
+  it.each<[number, GridCell, string]>([
+    [11, { userEnteredValue: { numberValue: -1 } }, 'Reorder point cannot be negative'],
+    [12, { userEnteredValue: { numberValue: -1 } }, 'Target qty cannot be negative'],
+    [11, { userEnteredValue: { stringValue: 'invalid' } }, 'Reorder point'],
+    [15, { userEnteredValue: { stringValue: 'yes' } }, 'Active must be a checkbox boolean'],
+    [13, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'Location'],
+    [14, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'Notes'],
     [11, { userEnteredValue: { formulaValue: '=1' } }, 'human settings'],
-    [12, { effectiveValue: { errorValue: { type: 'VALUE', message: 'Invalid' } } }, 'human settings'],
+    [12, { effectiveValue: { errorValue: { type: 'VALUE', message: 'Invalid' } } }, 'Target qty: A spreadsheet cell contains an error.'],
+    ...[0, 1, 3, 4, 9].map(column => [column, { effectiveValue: { errorValue: { type: 'VALUE', message: 'Invalid' } } }, `${INVENTORY_HEADERS[column]}: A spreadsheet cell contains an error.`] as [number, GridCell, string]),
   ])('identifies the Inventory settings row for column %s', async (column, invalidCell, message) => {
     const sheets = new FakeSheets();
     const id = '11111111-1111-4111-8111-111111111111';
