@@ -12,6 +12,8 @@ import { closeAllDatabases } from "./db.js";
 import { OperatorFacingError } from "./errors.js";
 import { getStock, recordAdjustment, recordReceipt } from "./handlers.js";
 import { submitOrderEmail, listReviewQueue, resolveReviewItem } from "./intake.js";
+import { syncBoms } from "./bom-sync.js";
+import { recordSale } from "./sales.js";
 import { syncSheet } from "./sheet-sync.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
 
@@ -99,7 +101,7 @@ export function toolError(
  * tool named here that still throws `NotImplementedError`, or one missing
  * from it that works, means the two have drifted.
  */
-export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet"] as const;
+export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale"] as const;
 
 export async function dispatch(
   ctx: PluginContext,
@@ -110,6 +112,10 @@ export async function dispatch(
   switch (declaration.name) {
     case "sync_sheet":
       return syncSheet(ctx, params, runCtx);
+    case "sync_boms":
+      return syncBoms(ctx, params, runCtx);
+    case "record_sale":
+      return recordSale(ctx, params, runCtx);
     case "submit_order_email":
       return submitOrderEmail(ctx, params, runCtx);
     case "list_review_queue":

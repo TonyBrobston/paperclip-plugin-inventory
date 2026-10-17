@@ -69,6 +69,39 @@ const manifest: PaperclipPluginManifestV1 = {
         properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
         required: ["type", "secretId"],
       },
+      [CONFIG_KEYS.configRepo]: {
+        type: "string",
+        title: "Private config repository (optional until BOM sync)",
+        description:
+          "The repository holding bom/, as owner/name. Copy it from private deployment settings; the repository name belongs in config, never in public code.",
+        pattern: "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$",
+      },
+      [CONFIG_KEYS.configRepoBranch]: {
+        type: "string",
+        title: "Config repository branch (optional)",
+        description: "Leave blank to read the repository's default branch.",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$",
+      },
+      [CONFIG_KEYS.configRepoToken]: {
+        type: "object", format: "secret-ref", title: "GitHub token for the config repository",
+        description:
+          "Save a GitHub token with read access to that repository as a Paperclip secret and pick it here. BOM files are private business data; the plugin only reads them.",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"],
+      },
+      [CONFIG_KEYS.bigcommerceStoreHash]: {
+        type: "string",
+        title: "BigCommerce store hash (optional until BOM sync)",
+        description:
+          "Used to check that a BOM's catalog key and option values exist in the store before the BOM is accepted. A BOM keyed on something the store does not have consumes nothing on every sale.",
+        pattern: "^[a-z0-9]{5,30}$",
+      },
+      [CONFIG_KEYS.bigcommerceToken]: {
+        type: "object", format: "secret-ref", title: "BigCommerce API token (products: read-only)",
+        description: "A token with read access to products. BOM sync only reads the catalog with it.",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"],
+      },
       [CONFIG_KEYS.databaseSchema]: {
         type: "string",
         title: "Schema name (optional)",

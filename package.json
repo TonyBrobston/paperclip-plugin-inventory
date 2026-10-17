@@ -8,7 +8,8 @@
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
-    "smoke": "node ./scripts/smoke.mjs"
+    "smoke": "node ./scripts/smoke.mjs",
+    "generate-install-docs": "node ./dist/install-docs-cli.js"
   },
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
@@ -31,7 +32,8 @@
   "author": "Tony Brobston",
   "license": "MIT",
   "dependencies": {
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@paperclipai/plugin-sdk": "^2026.1012.0",

@@ -11,7 +11,7 @@ parts, and gives agents the tools to keep it current: order emails in, sales
 out, a Google Sheet as the human-facing view, and a review queue for anything
 the plugin could not verify.
 
-**Status:** ledger, verified email intake, review resolution and `sync_sheet` are implemented. BOM and BigCommerce handlers arrive in phases 5–6. See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) before configuring sync.
+**Status:** ledger, verified email intake, review resolution, `sync_sheet`, `sync_boms` and `record_sale` are implemented. The BigCommerce bridge — `get_sellable` and `reconcile_bigcommerce` — arrives in phase 6. See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) and [BOMs: the file format, versioning, and what reaches the public docs](docs/boms.md) before configuring either sync.
 
 ## The ledger
 
@@ -64,7 +64,12 @@ see `docs/sdk-notes.md` (c).
 - **On hand is derived, never stored.** It is the sum of the ledger. There is
   no editable quantity field to fall out of date.
 - **Sales consume parts through the BOM version active at the time.** A BOM
-  edited next month never rewrites last month's history.
+  edited next month never rewrites last month's history: versions are
+  immutable, and the version id is in each ledger entry's provenance.
+- **A BOM is accepted only if it resolves.** Every part reference must already
+  exist, and every catalog key and option value must exist in BigCommerce. A
+  BOM that resolves to nothing consumes nothing, which is the one failure the
+  ledger cannot show you.
 
 `SPEC.md` is the full specification and the first thing committed here.
 `docs/sdk-notes.md` records what the Paperclip SDK actually supports and the
@@ -80,6 +85,8 @@ repository.
 | Database connection | yes | A Paperclip secret holding a PostgreSQL connection string. The plugin creates and owns one schema inside that database. |
 | Schema name | no | Defaults to `inventory`. |
 | Enabled vendors | no | Which order-email parsers to run. Defaults to all of them. |
+| Private config repository, branch and GitHub token | for `sync_boms` | Where `bom/` lives. Only that directory is ever read. |
+| BigCommerce store hash and API token | for `sync_boms` | Used to check a BOM's catalog key and option values exist before the BOM is accepted. |
 
 Credentials are secret references resolved at call time, never stored in
 plugin config and never written to logs. Business settings — BOM files, the
@@ -105,12 +112,12 @@ INVENTORY_TEST_DATABASE_URL=postgres://user:password@localhost:5432/scratch npm 
 CI runs the same commands against a PostgreSQL service container and fails if
 any test skipped.
 
-One build note worth keeping: `pg` is marked external in
-`esbuild.config.mjs` rather than bundled. It is CommonJS, and inlining it
-produces a worker that throws `Dynamic require of "events" is not supported`
-during module load — before the host's first RPC, so the failure looks like a
-dead plugin rather than a build problem. `npm run smoke` is the step that
-catches it.
+One build note worth keeping: `pg` and `yaml` are marked external in
+`esbuild.config.mjs` rather than bundled. Both are CommonJS, and inlining
+either produces a worker that throws `Dynamic require of "events"`/`"process"
+is not supported` during module load — before the host's first RPC, so the
+failure looks like a dead plugin rather than a build problem. `npm run smoke`
+is the step that catches it, and it caught both.
 
 ## License
 

@@ -19,18 +19,39 @@ const watch = process.argv.includes("--watch");
  * which is exactly what happens in a deployed install: the host npm-installs
  * this package, and `pg` is a declared runtime dependency.
  */
+/**
+ * `yaml` is external for the same reason, found the same way.
+ *
+ * Its CommonJS build calls `require("process")` while loading, which esbuild
+ * turns into the same throwing stub — so bundling it killed the worker during
+ * module load and `npm run smoke` caught it before anything was committed.
+ * Both are declared runtime dependencies, so Node resolves them from
+ * `node_modules` in a deployed install.
+ */
 const workerConfig = {
   ...presets.esbuild.worker,
-  external: [...(presets.esbuild.worker.external ?? []), "pg", "pg-native"],
+  external: [...(presets.esbuild.worker.external ?? []), "pg", "pg-native", "yaml"],
 };
+
+/**
+ * The documentation generator, built from the same sources as the worker.
+ *
+ * It is a command rather than a tool: regenerating a public repository is a
+ * reviewed pull request, not something an agent does mid-conversation. Built
+ * here so the rules it enforces — one anchor, no vendor names, no part numbers
+ * — are the same code the plugin uses, instead of a second copy in a script
+ * that could drift.
+ */
+const cliConfig = { ...workerConfig, entryPoints: ["src/install-docs-cli.ts"] };
 
 const workerCtx = await esbuild.context(workerConfig);
 const manifestCtx = await esbuild.context(presets.esbuild.manifest);
+const cliCtx = await esbuild.context(cliConfig);
 
 if (watch) {
-  await Promise.all([workerCtx.watch(), manifestCtx.watch()]);
-  console.log("esbuild watch mode enabled for worker and manifest");
+  await Promise.all([workerCtx.watch(), manifestCtx.watch(), cliCtx.watch()]);
+  console.log("esbuild watch mode enabled for worker, manifest and the docs generator");
 } else {
-  await Promise.all([workerCtx.rebuild(), manifestCtx.rebuild()]);
-  await Promise.all([workerCtx.dispose(), manifestCtx.dispose()]);
+  await Promise.all([workerCtx.rebuild(), manifestCtx.rebuild(), cliCtx.rebuild()]);
+  await Promise.all([workerCtx.dispose(), manifestCtx.dispose(), cliCtx.dispose()]);
 }
