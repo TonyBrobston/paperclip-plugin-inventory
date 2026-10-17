@@ -1,3 +1,8 @@
+import { applyOrderLine, sellableInTransaction } from '../src/bridge.js';
+import { synchronizeBoms } from '../src/bom-sync.js';
+import { activeBomYaml, CATALOG, fakeConfigRepo, RUN } from './support/boms.js';
+import { synchronizeSheet } from '../src/sheet-sync.js';
+import type { SheetsClient, SheetSnapshot } from '../src/sheets-client.js';
 import { beforeEach, afterEach, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createTestHarness, type TestHarness } from '@paperclipai/plugin-sdk/testing';
@@ -22,6 +27,49 @@ integration('verified email intake through the host harness', () => {
   const submit = (overrides: Record<string, unknown> = {}) => call('submit_order_email', {messageId:'synthetic-message',rawText,agentExtraction:correct(),...overrides});
   const count = async (table: string) => Number((await exec(t, `SELECT count(*)::int AS n FROM ${table}`))[0]!.n);
   const resolve = (id: unknown, extra: Record<string, unknown> = {}) => call('resolve_review_item', {reviewItemId:id,resolution:'accept',note:'Checked against the source email',...extra});
+  for (const vendor of ['amazon', 'formlabs']) {
+    const email = readFileSync(new URL(`./fixtures/${vendor}-synthetic.txt`, import.meta.url), 'utf8');
+    it(`${vendor}: mismatch and split-order submissions leave the ledger empty`, async () => {
+      const parsed = selectParser(email)!.parse(email);
+      const wrong = structuredClone(parsed); wrong.lines[0]!.quantity = 200;
+      expect((await submit({messageId:'wrong', vendor, rawText:email, agentExtraction:wrong})).data?.status).toBe('open');
+      expect((await submit({messageId:'split', vendor, rawText:email+'\nShipment 1 of 2', agentExtraction:parsed})).data?.status).toBe('open');
+      expect(await count('ledger_entries')).toBe(0);
+      expect(await count('orders')).toBe(0);
+      expect(await count('parts')).toBe(0);
+    });
+    it(`${vendor}: email through receipt, Sheet, BOM, reservation, shipment and sellable`, async () => {
+      const parsed = selectParser(email)!.parse(email);
+      const params = {messageId:'complete', vendor, rawText:email, agentExtraction:parsed};
+      expect((await submit(params)).data?.status).toBe('recorded');
+      expect((await submit(params)).data?.duplicate).toBe(true);
+      const partId = `${vendor}:${parsed.lines[0]!.vendorPartNumber}`;
+      expect((await call('record_receipt', {partId, quantity:2, reference:parsed.orderNumber})).error).toBeUndefined();
+      const snapshot: SheetSnapshot = {sheets:[]};
+      const batches: Record<string, any>[][] = [];
+      const sheets: SheetsClient = {email:'robot@example.invalid', async read(){return structuredClone(snapshot);}, async batch(requests){
+        batches.push(requests);
+        for (const req of requests) if (req.addSheet) snapshot.sheets.push({properties:(req.addSheet as {properties:any}).properties});
+      }};
+      await synchronizeSheet(t.db, sheets, 'synthetic-sheet', RUN);
+      expect(snapshot.sheets.map(tab=>tab.properties.title)).toContain('Inventory');
+      expect(batches.flat().some(req=>req.updateCells)).toBe(true);
+      await synchronizeBoms(t.db, fakeConfigRepo({synthetic:{'product-9001.yaml':activeBomYaml([{part:partId,qty:1}])}}), CATALOG, RUN, {});
+      const line = {orderId:'synthetic-sale',lineId:'1',catalogKey:'product-9001',options:[],ordered:1,shipped:0,refunded:0,cancelled:false,observedAt:'2026-10-16T01:00:00Z'};
+      const sellable = () => t.db.transaction(c=>sellableInTransaction(c));
+      expect(await sellable()).toMatchObject([{quantity:2}]);
+      await applyOrderLine(t.db, line, RUN, false);
+      expect(await sellable()).toMatchObject([{quantity:1}]);
+      const shipped = {...line,shipped:1,observedAt:'2026-10-16T02:00:00Z'};
+      await applyOrderLine(t.db, shipped, RUN, false);
+      expect(await applyOrderLine(t.db, shipped, RUN, false)).toEqual({duplicate:true});
+      expect(await sellable()).toMatchObject([{quantity:1}]);
+      const stock = await call('get_stock', {partId});
+      expect(JSON.stringify(stock.data)).toContain('onHand');
+      const [row] = await exec(t,'SELECT on_hand, committed, on_order FROM part_stock');
+      expect([Number(row!.on_hand), Number(row!.committed), Number(row!.on_order)]).toEqual([1,0,0]);
+    });
+  }
   it('records verified purchases as on order, with exact provenance and no on-hand movement', async () => {
     const result = await submit();
     expect(result.error).toBeUndefined(); expect(result.data?.status).toBe('recorded');

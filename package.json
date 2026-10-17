@@ -20,7 +20,8 @@
     "migrations",
     "src",
     "SPEC.md",
-    "README.md"
+    "README.md",
+    "skills"
   ],
   "keywords": [
     "paperclip",

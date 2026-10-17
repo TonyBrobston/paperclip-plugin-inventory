@@ -119,6 +119,10 @@ is not supported` during module load — before the host's first RPC, so the
 failure looks like a dead plugin rather than a build problem. `npm run smoke`
 is the step that catches it, and it caught both.
 
+## Inventory clerk
+
+Install [inventory-clerk](skills/inventory-clerk/SKILL.md) for the agent handling purchase intake. See [supported vendor layouts and Phase 7 verification](docs/phase7.md).
+
 ## License
 
 MIT
