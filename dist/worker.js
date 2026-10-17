@@ -43460,7 +43460,7 @@ function validateBom(fileName, document2) {
     problems.push(`status must be "active" or "draft", found ${JSON.stringify(raw.status)}`);
   }
   const installDocument = raw.install_document === void 0 ? void 0 : text3(raw.install_document, "install_document", problems, 300);
-  if (installDocument !== void 0 && !/^install-instructions\/[^\s]+\.MD$/.test(installDocument)) {
+  if (installDocument !== void 0 && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
     problems.push(
       `install_document "${installDocument}" is not an install-instructions/<name>.MD path in the documentation repository`
     );
@@ -43468,6 +43468,13 @@ function validateBom(fileName, document2) {
   const sourceRevision = raw.source_revision === void 0 ? void 0 : text3(raw.source_revision, "source_revision", problems, 64);
   const seen = /* @__PURE__ */ new Set();
   const lines = parseLines(raw.lines, "lines", {}, problems, seen);
+  if (raw.unresolved_lines !== void 0) {
+    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, /* @__PURE__ */ new Set(), { allowEmpty: true });
+    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
+    if (status !== "draft" && unresolvedLines.length > 0) {
+      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
+    }
+  }
   const optionScopes = [];
   if (raw.options !== void 0) {
     if (!Array.isArray(raw.options)) {
@@ -43498,7 +43505,7 @@ function validateBom(fileName, document2) {
       }
     }
   }
-  const unresolved = lines.filter((line) => line.pending.length > 0);
+  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
   if (status === "active" && unresolved.length > 0) {
     problems.push(
       `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`
@@ -43553,8 +43560,10 @@ function selectLines(bom, selections) {
   const names = new Set(bom.optionScopes.map((s) => s.optionName));
   return {
     lines: bom.lines.filter(
-      (line) => line.optionName === void 0 || chosen.has(`${line.optionName}\0${line.optionValue}`)
+      (line) => !line.inclusionPending && (line.optionName === void 0 || chosen.has(`${line.optionName}\0${line.optionValue}`))
     ),
+    missing: [...names].filter((name) => !selections.some((s) => s.option === name)),
+    conflicting: [...names].filter((name) => new Set(selections.filter((s) => s.option === name).map((s) => s.value)).size > 1),
     unmatched: selections.filter(
       (s) => names.has(s.option) && !declared.has(`${s.option}\0${s.value}`)
     ),
@@ -43843,6 +43852,15 @@ async function synchronizeBoms(db, repo, catalog, run, options = {}) {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
       JSON.stringify(["inventory-boms", db.schema])
     ]);
+    const existing = await client.query(
+      "SELECT DISTINCT ON (catalog_key) catalog_key, version FROM boms ORDER BY catalog_key, version DESC"
+    );
+    const present = new Set(boms.map((bom) => bom.catalogKey));
+    for (const current of existing.rows) {
+      if (!present.has(current.catalog_key)) {
+        warnings.push(`No BOM file for ${current.catalog_key} exists at ${commit}, but version ${current.version} is still active and still expands on every sale. Deleting a file does not retire an immutable version.`);
+      }
+    }
     const parts = await readParts(client);
     const partProblems = [];
     const resolved = /* @__PURE__ */ new Map();
@@ -44068,7 +44086,12 @@ async function expandSale(db, input2) {
         `No BOM is active for ${input2.catalogKey}. Add the BOM file to the config repository and run sync_boms; until then a sale of this product has nothing to consume, and recording it would understate what was used.`
       );
     }
-    const { lines, unmatched, ignored } = selectLines(active.bom, input2.selections);
+    const { lines, unmatched, ignored, missing, conflicting } = selectLines(active.bom, input2.selections);
+    if (missing.length > 0 || conflicting.length > 0) {
+      throw new InputError(
+        `BOM version ${active.version} of ${active.catalogKey} requires exactly one selection for each declared option. Missing: ${missing.join(", ") || "none"}; conflicting: ${conflicting.join(", ") || "none"}. Nothing was consumed.`
+      );
+    }
     if (unmatched.length > 0) {
       throw new InputError(
         `BOM version ${active.version} of ${active.catalogKey} has no answer for ${unmatched.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}. The storefront offers a value this BOM does not, which is an option renamed or added without updating the BOM. Nothing was consumed.`
@@ -44313,24 +44336,34 @@ function parseCounts(rows) {
   }
   return counts;
 }
-function settingsOf(row) {
-  validateInputCells(row.slice(11, 16), "Inventory human settings");
-  const cells2 = values(row);
+function inventoryCellValue(cell, rowNumber, column) {
+  try {
+    return cellValue(cell);
+  } catch (error62) {
+    if (error62 instanceof SheetError) throw new SheetError(`Inventory row ${rowNumber} ${INVENTORY_HEADERS[column]}: ${error62.message}`);
+    throw error62;
+  }
+}
+function settingsOf(row, rowNumber) {
+  const label2 = `Inventory row ${rowNumber}`;
+  validateInputCells(row.slice(11, 16), `${label2} human settings`);
+  const cells2 = row.slice(11, 16).map((cell, offset) => inventoryCellValue(cell, rowNumber, 11 + offset));
   const result = {};
   for (const [offset, name] of ["reorderPoint", "targetQty", "location", "notes", "active"].entries()) {
-    const value = cells2[11 + offset];
+    const value = cells2[offset];
+    const field2 = `${label2} ${INVENTORY_HEADERS[11 + offset]}`;
     if (value === void 0 || value === "") {
       result[name] = null;
       continue;
     }
     if (offset < 2) {
-      const qty = parseQuantity(value, { label: name });
-      if (qty < 0) throw new SheetError(`${name} cannot be negative.`);
+      const qty = parseQuantity(value, { label: field2 });
+      if (qty < 0) throw new SheetError(`${field2} cannot be negative.`);
       result[name] = qty;
     } else if (offset === 4) {
-      if (typeof value !== "boolean") throw new SheetError("Active must be a checkbox boolean.");
+      if (typeof value !== "boolean") throw new SheetError(`${field2} must be a checkbox boolean.`);
       result[name] = value;
-    } else result[name] = text4(value, name, 5e3);
+    } else result[name] = text4(value, field2, 5e3);
   }
   return result;
 }
@@ -44401,7 +44434,8 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
     const settings = /* @__PURE__ */ new Map();
     for (let i = 1; i < inventoryRows.length; i++) {
       const row = inventoryRows[i] ?? [];
-      const rawId = cellValue(row[0]);
+      row.slice(0, 11).forEach((cell, column) => inventoryCellValue(cell, i + 1, column));
+      const rawId = inventoryCellValue(row[0], i + 1, 0);
       if (rawId === void 0 || rawId === "") {
         if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
         continue;
@@ -44409,7 +44443,7 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
       const id = text4(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
-      settings.set(id, settingsOf(row));
+      settings.set(id, settingsOf(row, i + 1));
     }
     const result = await db.transaction(async (client) => {
       const known = new Set((await client.query("SELECT id FROM parts")).rows.map((p) => p.id));
@@ -44606,7 +44640,7 @@ var TOOL_DECLARATIONS = [
         },
         options: {
           type: "array",
-          description: `The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. An option this product's BOM has no lines for consumes nothing and is reported back.`,
+          description: 'The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. Every option name declared by the BOM requires exactly one selected value, including explicit no-parts values. Missing or conflicting selections refuse the sale. Options absent from the BOM are ignored and reported back.',
           items: {
             anyOf: [
               { type: "string" },

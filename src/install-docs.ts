@@ -46,7 +46,7 @@ const VENDOR_WORDS = [...SUPPORTED_VENDORS, "mcmaster-carr", "mc master"];
 /**
  * A vendor part number, in the shapes these vendors actually use.
  *
- * `90935A148` is McMaster's. Deliberately not a general "looks like a code"
+ * `99999Z999` is a synthetic example. Deliberately not a general "looks like a code"
  * rule: the documents are full of `M6 x 25mm` and `5/16-18`, which are
  * specifications a customer needs, not identifiers.
  */
@@ -68,7 +68,7 @@ export function renderLine(line: { qty: number; customerDescription: string }): 
 
 /** The lines a document may show: the ones in every kit. */
 export function publicLines(bom: BomFile): BomLine[] {
-  return bom.lines.filter((line) => line.optionName === undefined);
+  return bom.lines.filter((line) => line.optionName === undefined && !line.inclusionPending);
 }
 
 /** Every reason this text may not be published, or an empty list. */

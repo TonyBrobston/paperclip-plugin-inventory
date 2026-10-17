@@ -134,7 +134,7 @@ function validateBom(fileName, document) {
     problems.push(`status must be "active" or "draft", found ${JSON.stringify(raw.status)}`);
   }
   const installDocument = raw.install_document === void 0 ? void 0 : text(raw.install_document, "install_document", problems, 300);
-  if (installDocument !== void 0 && !/^install-instructions\/[^\s]+\.MD$/.test(installDocument)) {
+  if (installDocument !== void 0 && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
     problems.push(
       `install_document "${installDocument}" is not an install-instructions/<name>.MD path in the documentation repository`
     );
@@ -142,6 +142,13 @@ function validateBom(fileName, document) {
   const sourceRevision = raw.source_revision === void 0 ? void 0 : text(raw.source_revision, "source_revision", problems, 64);
   const seen = /* @__PURE__ */ new Set();
   const lines = parseLines(raw.lines, "lines", {}, problems, seen);
+  if (raw.unresolved_lines !== void 0) {
+    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, /* @__PURE__ */ new Set(), { allowEmpty: true });
+    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
+    if (status !== "draft" && unresolvedLines.length > 0) {
+      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
+    }
+  }
   const optionScopes = [];
   if (raw.options !== void 0) {
     if (!Array.isArray(raw.options)) {
@@ -172,7 +179,7 @@ function validateBom(fileName, document) {
       }
     }
   }
-  const unresolved = lines.filter((line) => line.pending.length > 0);
+  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
   if (status === "active" && unresolved.length > 0) {
     problems.push(
       `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`
@@ -235,7 +242,7 @@ function renderLine(line) {
   return `- ${line.qty}x - ${line.customerDescription}`;
 }
 function publicLines(bom) {
-  return bom.lines.filter((line) => line.optionName === void 0);
+  return bom.lines.filter((line) => line.optionName === void 0 && !line.inclusionPending);
 }
 function publicTextProblems(text2) {
   const problems = [];

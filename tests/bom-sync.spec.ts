@@ -150,6 +150,15 @@ options:
     ]);
   });
 
+  it("warns in preview and sync when a deleted file leaves a live version", async () => {
+    await sync(ONE_PART);
+    for (const dryRun of [true, false]) {
+      const report = await synchronizeBoms(target.db, fakeConfigRepo({ removed: {} }), CATALOG, RUN, {commit: "removed", dryRun});
+      expect(report.warnings.join()).toMatch(/product-9001.*version 1 is still active/);
+      expect(await exec(target, "SELECT id FROM boms")).toHaveLength(1);
+    }
+  });
+
   it("holds a draft rather than importing it", async () => {
     const report = await sync({
       "product-9001.yaml": `catalog_key: product-9001

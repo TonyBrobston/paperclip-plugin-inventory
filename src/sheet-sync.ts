@@ -50,21 +50,30 @@ function parseCounts(rows: GridCell[][]): Count[] {
   }
   return counts;
 }
-function settingsOf(row: GridCell[]): Record<string, CellValue | null> {
-  validateInputCells(row.slice(11, 16), 'Inventory human settings');
-  const cells = values(row);
+function inventoryCellValue(cell: GridCell | undefined, rowNumber: number, column: number): CellValue | undefined {
+  try { return cellValue(cell); }
+  catch (error) {
+    if (error instanceof SheetError) throw new SheetError(`Inventory row ${rowNumber} ${INVENTORY_HEADERS[column]}: ${error.message}`);
+    throw error;
+  }
+}
+function settingsOf(row: GridCell[], rowNumber: number): Record<string, CellValue | null> {
+  const label = `Inventory row ${rowNumber}`;
+  validateInputCells(row.slice(11, 16), `${label} human settings`);
+  const cells = row.slice(11, 16).map((cell, offset) => inventoryCellValue(cell, rowNumber, 11 + offset));
   const result: Record<string, CellValue | null> = {};
   for (const [offset, name] of ['reorderPoint', 'targetQty', 'location', 'notes', 'active'].entries()) {
-    const value = cells[11 + offset];
+    const value = cells[offset];
+    const field = `${label} ${INVENTORY_HEADERS[11 + offset]}`;
     if (value === undefined || value === '') { result[name] = null; continue; }
     if (offset < 2) {
-      const qty = parseQuantity(value, { label: name });
-      if (qty < 0) throw new SheetError(`${name} cannot be negative.`);
+      const qty = parseQuantity(value, { label: field });
+      if (qty < 0) throw new SheetError(`${field} cannot be negative.`);
       result[name] = qty;
     } else if (offset === 4) {
-      if (typeof value !== 'boolean') throw new SheetError('Active must be a checkbox boolean.');
+      if (typeof value !== 'boolean') throw new SheetError(`${field} must be a checkbox boolean.`);
       result[name] = value;
-    } else result[name] = text(value, name, 5000);
+    } else result[name] = text(value, field, 5000);
   }
   return result;
 }
@@ -137,7 +146,8 @@ export async function synchronizeSheet(db: DatabaseHandle, sheets: SheetsClient,
     const settings = new Map<string, Record<string, CellValue | null>>();
     for (let i = 1; i < inventoryRows.length; i++) {
       const row = inventoryRows[i] ?? [];
-      const rawId = cellValue(row[0]);
+      row.slice(0, 11).forEach((cell, column) => inventoryCellValue(cell, i + 1, column));
+      const rawId = inventoryCellValue(row[0], i + 1, 0);
       if (rawId === undefined || rawId === '') {
         if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
         continue;
@@ -145,7 +155,7 @@ export async function synchronizeSheet(db: DatabaseHandle, sheets: SheetsClient,
       const id = text(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
-      settings.set(id, settingsOf(row));
+      settings.set(id, settingsOf(row, i + 1));
     }
     const result = await db.transaction(async client => {
       const known = new Set((await client.query('SELECT id FROM parts')).rows.map(p => p.id));

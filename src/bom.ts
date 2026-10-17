@@ -35,6 +35,8 @@ export type CatalogKeyKind = "product_id" | "variant_sku";
 export interface BomLine {
   /** Absent only in a draft, where `pending` says what is missing. */
   part?: string;
+  /** Draft evidence whose inclusion condition has not been confirmed. */
+  inclusionPending?: boolean;
   /**
    * Absent only in a draft.
    *
@@ -285,7 +287,7 @@ export function validateBom(fileName: string, document: unknown): { bom?: BomFil
     raw.install_document === undefined
       ? undefined
       : text(raw.install_document, "install_document", problems, 300);
-  if (installDocument !== undefined && !/^install-instructions\/[^\s]+\.MD$/.test(installDocument)) {
+  if (installDocument !== undefined && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
     // The generator writes into one directory of one repository. A path it
     // cannot recognise is refused here rather than at write time.
     problems.push(
@@ -299,6 +301,13 @@ export function validateBom(fileName: string, document: unknown): { bom?: BomFil
 
   const seen = new Set<string>();
   const lines = parseLines(raw.lines, "lines", {}, problems, seen);
+  if (raw.unresolved_lines !== undefined) {
+    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, new Set(), { allowEmpty: true });
+    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
+    if (status !== "draft" && unresolvedLines.length > 0) {
+      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
+    }
+  }
   const optionScopes: OptionScope[] = [];
 
   if (raw.options !== undefined) {
@@ -331,7 +340,7 @@ export function validateBom(fileName: string, document: unknown): { bom?: BomFil
     }
   }
 
-  const unresolved = lines.filter((line) => line.pending.length > 0);
+  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
   if (status === "active" && unresolved.length > 0) {
     problems.push(
       `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`,
@@ -411,6 +420,7 @@ export interface OptionSelection {
 /**
  * The lines one sale consumes.
  *
+ * Missing or conflicting values for declared option names must refuse the sale.
  * Base lines always; an option-scoped line only when that option's selected
  * value matches. Two kinds of selection the BOM has no lines for are told
  * apart, because they are different events:
@@ -426,16 +436,18 @@ export interface OptionSelection {
 export function selectLines(
   bom: BomFile,
   selections: readonly OptionSelection[],
-): { lines: BomLine[]; unmatched: OptionSelection[]; ignored: OptionSelection[] } {
+): { lines: BomLine[]; unmatched: OptionSelection[]; ignored: OptionSelection[]; missing: string[]; conflicting: string[] } {
   const chosen = new Set(selections.map((s) => `${s.option}\u0000${s.value}`));
   const declared = new Set(bom.optionScopes.map((s) => `${s.optionName}\u0000${s.optionValue}`));
   const names = new Set(bom.optionScopes.map((s) => s.optionName));
   return {
     lines: bom.lines.filter(
       (line) =>
-        line.optionName === undefined ||
-        chosen.has(`${line.optionName}\u0000${line.optionValue}`),
+        !line.inclusionPending && (line.optionName === undefined ||
+        chosen.has(`${line.optionName}\u0000${line.optionValue}`)),
     ),
+    missing: [...names].filter((name) => !selections.some((s) => s.option === name)),
+    conflicting: [...names].filter((name) => new Set(selections.filter((s) => s.option === name).map((s) => s.value)).size > 1),
     unmatched: selections.filter(
       (s) => names.has(s.option) && !declared.has(`${s.option}\u0000${s.value}`),
     ),

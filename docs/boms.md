@@ -143,3 +143,10 @@ Its refusals are the acceptance criterion in code:
 
 Both tokens are secret references resolved per call, never stored in plugin
 config and never written to a log or an error message.
+
+
+### Unconfirmed inclusion rules
+
+Put draft evidence whose inclusion condition is unknown in `unresolved_lines`, using the same line fields as `lines`. It is excluded from sale selection and public generation. Any nonempty `unresolved_lines` blocks activation even if every part, quantity and pending note is resolved. After confirmation, move each row into unconditional `lines` or an exact option name/value scope; preserve its `source_line_id`. Never infer a catalog option from prose.
+
+Sales require exactly one value for every option name declared by the BOM, including explicit no-parts values. Missing or conflicting selections refuse the whole sale before ledger writes. Removing a BOM file does not retire its immutable active version; preview and sync warn that it still expands.

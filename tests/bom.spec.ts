@@ -244,8 +244,9 @@ describe("content hash", () => {
 describe("selecting the lines one sale consumes", () => {
   const bom = parse(VALID).bom!;
 
-  it("takes the base lines when no option is selected", () => {
-    const { lines, unmatched, ignored } = selectLines(bom, []);
+  it("reports missing declared options when no option is selected", () => {
+    const { lines, unmatched, ignored, missing } = selectLines(bom, []);
+    expect(missing).toEqual(["Which switch type do you have?"]);
     expect(lines.map((line) => line.part)).toEqual(["vendor-a:part-001", "vendor-a:part-002"]);
     expect(unmatched).toEqual([]);
     expect(ignored).toEqual([]);
@@ -275,5 +276,27 @@ describe("selecting the lines one sale consumes", () => {
     const { unmatched, ignored } = selectLines(bom, [{ option: "Engraving", value: "Yes" }]);
     expect(unmatched).toEqual([]);
     expect(ignored).toEqual([{ option: "Engraving", value: "Yes" }]);
+  });
+});
+
+
+describe("unresolved inclusion and document containment", () => {
+  it.each(["install-instructions/../../outside.MD", "install-instructions/sub/file.MD", "install-instructions/..\\outside.MD"])("refuses %s", (target) => {
+    expect(parse(VALID.replace("install-instructions/Example-Kit-Install-Instructions.MD", target)).problems.length).toBeGreaterThan(0);
+  });
+  it("holds unresolved inclusion separately even when parts and quantities are known", () => {
+    const yaml = VALID + `
+unresolved_lines:
+  - part: vendor-a:part-099
+    qty: 1
+    customer_description: Conditional bracket
+`;
+    expect(parse(yaml).problems.join()).toContain("no confirmed inclusion rule");
+    const draft = parse(yaml.replace("status: active", "status: draft"));
+    expect(draft.problems).toEqual([]);
+    expect(selectLines(draft.bom!, []).lines.map(l => l.part)).not.toContain("vendor-a:part-099");
+  });
+  it("reports conflicting values for a declared option", () => {
+    expect(selectLines(parse(VALID).bom!, [{option: "Which switch type do you have?", value: "Rocker"}, {option: "Which switch type do you have?", value: "None"}]).conflicting).toEqual(["Which switch type do you have?"]);
   });
 });

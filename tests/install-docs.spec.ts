@@ -155,9 +155,9 @@ lines:
   it("refuses to publish a vendor name or a part number", () => {
     for (const description of [
       "McMaster screws",
-      "Screws, mcmaster-carr 90935A148",
+      "Screws, mcmaster-carr 99999Z999",
       "Screws (vendor-a:part-001)",
-      "Part 90935A148",
+      "Part 99999Z999",
     ]) {
       expect(publicTextProblems(description), description).not.toEqual([]);
       const leaky = bomOf(BOM.replace('"Shelf bracket"', JSON.stringify(description)));

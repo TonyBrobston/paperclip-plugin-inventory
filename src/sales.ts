@@ -172,7 +172,12 @@ export async function expandSale(
       );
     }
 
-    const { lines, unmatched, ignored } = selectLines(active.bom, input.selections);
+    const { lines, unmatched, ignored, missing, conflicting } = selectLines(active.bom, input.selections);
+    if (missing.length > 0 || conflicting.length > 0) {
+      throw new InputError(
+        `BOM version ${active.version} of ${active.catalogKey} requires exactly one selection for each declared option. Missing: ${missing.join(", ") || "none"}; conflicting: ${conflicting.join(", ") || "none"}. Nothing was consumed.`,
+      );
+    }
     if (unmatched.length > 0) {
       throw new InputError(
         `BOM version ${active.version} of ${active.catalogKey} has no answer for ${unmatched.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}. The storefront offers a value this BOM does not, which is an option renamed or added without updating the BOM. Nothing was consumed.`,

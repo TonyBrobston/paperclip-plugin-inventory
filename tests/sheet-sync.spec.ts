@@ -63,6 +63,30 @@ describe('Sheet boundary safety', () => {
     expect(() => parseSheetSettings({ spreadsheetId: sheetId, googleServiceAccount: 'private-key' })).toThrow(/Paperclip secret/);
     expect(parseSheetSettings({ spreadsheetId: sheetId, googleServiceAccount: { type: 'secret_ref', secretId: 'synthetic-key' } }).spreadsheetId).toBe(sheetId);
   });
+  it.each<[number, GridCell, string]>([
+    [11, { userEnteredValue: { numberValue: -1 } }, 'Reorder point cannot be negative'],
+    [12, { userEnteredValue: { numberValue: -1 } }, 'Target qty cannot be negative'],
+    [11, { userEnteredValue: { stringValue: 'invalid' } }, 'Reorder point'],
+    [15, { userEnteredValue: { stringValue: 'yes' } }, 'Active must be a checkbox boolean'],
+    [13, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'Location'],
+    [14, { userEnteredValue: { stringValue: 'x'.repeat(5001) } }, 'Notes'],
+    [11, { userEnteredValue: { formulaValue: '=1' } }, 'human settings'],
+    [12, { effectiveValue: { errorValue: { type: 'VALUE', message: 'Invalid' } } }, 'Target qty: A spreadsheet cell contains an error.'],
+    ...[0, 1, 3, 4, 9].map(column => [column, { effectiveValue: { errorValue: { type: 'VALUE', message: 'Invalid' } } }, `${INVENTORY_HEADERS[column]}: A spreadsheet cell contains an error.`] as [number, GridCell, string]),
+  ])('identifies the Inventory settings row for column %s', async (column, invalidCell, message) => {
+    const sheets = new FakeSheets();
+    const id = '11111111-1111-4111-8111-111111111111';
+    sheets.snapshot.sheets = [tab(1, 'Inventory', [INVENTORY_HEADERS, [], [id]])];
+    sheets.rows('Inventory')[2].values![column] = invalidCell as GridCell;
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const release = vi.fn();
+    const transaction = vi.fn();
+    const db = { schema: 'synthetic', pool: { connect: async () => ({ query, release }) }, transaction };
+    await expect(synchronizeSheet(db as any, sheets, sheetId, run)).rejects.toThrow(`Inventory row 3 ${message}`);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(sheets.batches).toEqual([]);
+    expect(release).toHaveBeenCalledOnce();
+  });
   it('writes formula-looking text as literal string cells', () => {
     const result = writeCells(1, 1, 0, [['=IMPORTXML("https://example.invalid")', 3, false]]) as any;
     expect(result.updateCells.rows[0].values.map((c: any) => c.userEnteredValue)).toEqual([{ stringValue: '=IMPORTXML("https://example.invalid")' }, { numberValue: 3 }, { boolValue: false }]);

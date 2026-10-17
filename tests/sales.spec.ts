@@ -144,6 +144,12 @@ options:
 `;
     await sync({ "KIT-9002-IN.yaml": optioned });
 
+    await expect(sell({catalogKey: "KIT-9002-IN"})).rejects.toThrow(/requires exactly one selection/);
+    await expect(sell({catalogKey: "KIT-9002-IN", selections: [
+      {option: "Which switch type do you have?", value: "Rocker"},
+      {option: "Which switch type do you have?", value: "None"},
+    ]})).rejects.toThrow(/conflicting: Which switch/);
+    expect((await readStock(target.db, {kind: "vendor", vendor: "vendor-a", vendorPartNumber: "part-001", ref: "vendor-a:part-001"}))[0]?.onHand).toBe(100);
     const withRocker = await sell({
       catalogKey: "KIT-9002-IN",
       selections: [{ option: "Which switch type do you have?", value: "Rocker" }],

@@ -191,6 +191,16 @@ export async function synchronizeBoms(
       JSON.stringify(["inventory-boms", db.schema]),
     ]);
 
+    const existing = await client.query<{ catalog_key: string; version: number }>(
+      "SELECT DISTINCT ON (catalog_key) catalog_key, version FROM boms ORDER BY catalog_key, version DESC",
+    );
+    const present = new Set(boms.map((bom) => bom.catalogKey));
+    for (const current of existing.rows) {
+      if (!present.has(current.catalog_key)) {
+        warnings.push(`No BOM file for ${current.catalog_key} exists at ${commit}, but version ${current.version} is still active and still expands on every sale. Deleting a file does not retire an immutable version.`);
+      }
+    }
+
     const parts = await readParts(client);
     const partProblems: string[] = [];
     const resolved = new Map<string, Map<string, string>>();
