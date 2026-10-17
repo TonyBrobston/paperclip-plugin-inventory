@@ -74,7 +74,7 @@ async function submitCount(db:DatabaseHandle,client:PoolClient,actor:NativeActor
  const current=await settings(client,true);
  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`count:${key}`]);
  const old=await client.query('SELECT * FROM physical_counts WHERE submission_key=$1',[key]);
- const payload={lines,reason};
+ const payload={lines,reason,...(input.refundBasis?{refundBasis:input.refundBasis}:{})};
  if(old.rows[0]) {if(json(old.rows[0].payload)!==json(JSON.parse(json(payload)))) {
   // JSONB key ordering is not significant.
   const stored=old.rows[0].payload; if(stored.reason!==reason||json(stored.lines.map((l:any)=>[l.partId,l.expected,l.counted,l.ledgerRevision]))!==json(lines.map(l=>[l.partId,l.expected,l.counted,l.ledgerRevision])))throw new InputError('Submission key was already used with different counts.');
@@ -101,7 +101,7 @@ export async function appliedRefundUnits(client:PoolClient,orderId:string,lineId
  return Math.max(0,...applied.rows.map(row=>Number(JSON.parse(row.root_key)[3])));
 }
 /** Trusted domain callers share the same count policy and transaction. */
-export async function submitAdjustmentBatch(db:DatabaseHandle,client:PoolClient,actor:NativeActor,deltas:{partId:string;quantity:number}[],submissionKey:string,reason:string,forceApproval=false):Promise<{countId:string;status:string;duplicate:boolean}> {
+export async function submitAdjustmentBatch(db:DatabaseHandle,client:PoolClient,actor:NativeActor,deltas:{partId:string;quantity:number}[],submissionKey:string,reason:string,forceApproval=false,refundBasis?:{partId:string;quantity:number}[]):Promise<{countId:string;status:string;duplicate:boolean}> {
  await settings(client,true);
  const previous=await client.query('SELECT * FROM physical_counts WHERE submission_key=$1',[submissionKey]);
  if(previous.rows[0]) {
@@ -117,7 +117,7 @@ export async function submitAdjustmentBatch(db:DatabaseHandle,client:PoolClient,
  await lockParts(client,deltas.map(l=>l.partId));
  const lines=[];
  for(const delta of deltas){const snap=await snapshot(client,delta.partId);lines.push({...snap,counted:Number((snap.expected+delta.quantity).toFixed(4))});}
- return submitCount(db,client,actor,{lines,submissionKey,reason},true,forceApproval);
+ return submitCount(db,client,actor,{lines,submissionKey,reason,refundBasis},true,forceApproval);
 }
 async function orderRows(client:PoolClient,orderId:string) {
  const order=await client.query('SELECT * FROM orders WHERE id=$1',[orderId]); if(!order.rows[0])throw new InputError('Order was not found.');
@@ -207,15 +207,27 @@ export async function executeNative(db:DatabaseHandle,actor:NativeActor,operatio
    const key=JSON.parse(count.submission_key.slice(0,count.submission_key.lastIndexOf(']')+1));
    const remaining=Number(key[3])-await appliedRefundUnits(client,key[1],key[2]);
    if(remaining<=0)throw new InputError('This refund has already been credited.');
-   const line=await client.query('SELECT expansion FROM bigcommerce_lines WHERE order_id=$1 AND line_id=$2',[key[1],key[2]]);
-   const parts=await client.query('SELECT id,vendor,vendor_part_number FROM parts');
-   const ids=new Map(parts.rows.map(p=>[`${p.vendor}:${p.vendor_part_number}`.toLowerCase(),p.id]));
-   const deltas=line.rows[0]?line.rows[0].expansion.map((p:{part:string;quantity:number})=>{
-    const partId=ids.get(p.part.toLowerCase());if(!partId)throw new InputError('Pinned BOM part no longer exists.');
-    return {partId,quantity:Number((remaining*p.quantity).toFixed(4))};
-   }):count.payload.lines.map((l:CountLine)=>({partId:l.partId,quantity:Number(((l.counted-l.expected)*remaining/Number(key[3])).toFixed(4))}));
+   // Successors contain only the remaining delta. Always derive credits from
+   // the immutable root basis, never from a reduced successor's count lines.
+   const rootKey=JSON.stringify(key);
+   const root=await client.query('SELECT payload FROM physical_counts WHERE submission_key=$1',[rootKey]);
+   if(!root.rows[0])throw new InputError('Original refund count was not found.');
+   let basis=(root.rows[0].payload.refundBasis??count.payload.refundBasis) as {partId:string;quantity:number}[]|undefined;
+   if(!basis) {
+    // Compatibility for proposals created before the per-unit basis was stored.
+    const line=await client.query('SELECT expansion FROM bigcommerce_lines WHERE order_id=$1 AND line_id=$2',[key[1],key[2]]);
+    if(line.rows[0]) {
+     const parts=await client.query('SELECT id,vendor,vendor_part_number FROM parts');
+     const ids=new Map(parts.rows.map(p=>[`${p.vendor}:${p.vendor_part_number}`.toLowerCase(),p.id]));
+     basis=line.rows[0].expansion.map((p:{part:string;quantity:number})=>{
+      const partId=ids.get(p.part.toLowerCase());if(!partId)throw new InputError('Pinned BOM part no longer exists.');
+      return {partId,quantity:p.quantity};
+     });
+    } else basis=root.rows[0].payload.lines.map((l:CountLine)=>({partId:l.partId,quantity:(l.counted-l.expected)/Number(key[3])}));
+   }
+   const deltas=basis!.map(p=>({partId:p.partId,quantity:Number((remaining*p.quantity).toFixed(4))}));
    const submissionKey=`${count.submission_key}:after:${id}`;
-   const next=await submitAdjustmentBatch(db,client,actor,deltas,submissionKey,count.reason,true);
+   const next=await submitAdjustmentBatch(db,client,actor,deltas,submissionKey,count.reason,true,basis);
    await audit(client,actor,operation,id,{countId:id,status:count.status},{...next,submissionKey},reason);
    return next;
   }

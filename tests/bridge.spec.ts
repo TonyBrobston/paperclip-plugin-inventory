@@ -104,6 +104,36 @@ integration("BigCommerce lifecycle", () => {
     await apply(snapshot);expect(await stock()).toMatchObject({onHand:18});
     expect(await apply(snapshot)).toEqual({duplicate:true});
   });
+  it.each([{legacy:false,approveFirstEarly:false},{legacy:true,approveFirstEarly:false},{legacy:false,approveFirstEarly:true}])("preserves remaining refund credit across repeated refreshes before checkpoint %j", async({legacy,approveFirstEarly})=>{
+    const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(rows[0].revision),reason:'Require review',settings:{...rows[0].settings,approvalMode:'all'}});
+    const first=await apply({shipped:2,refunded:1,observedAt:'2026-01-02T00:00:00Z'}) as any;
+    const latest={shipped:2,refunded:2,observedAt:'2026-01-03T00:00:00Z'};
+    if(approveFirstEarly)await executeNative(target.db,human,'approve_count',{countId:first.countId,reason:'First verified'});
+    // Emulate the pre-upgrade writer at INSERT time; immutable history stays intact.
+    const legacyDb={...target.db,transaction:<T,>(fn:(client:any)=>Promise<T>)=>target.db.transaction(client=>fn({
+      query:(sql:string,params?:any[])=>{
+        if(sql.startsWith('INSERT INTO physical_counts(')) {
+          params=[...params!];const payload=JSON.parse(params[5]);delete payload.refundBasis;params[5]=JSON.stringify(payload);
+        }
+        return client.query(sql,params);
+      },
+    }))};
+    const second=await (legacy?applyOrderLine(legacyDb,line(latest),RUN,false):apply(latest)) as any;
+    if(!approveFirstEarly)await executeNative(target.db,human,'approve_count',{countId:first.countId,reason:'First verified'});
+    await executeNative(target.db,human,'reject_count',{countId:second.countId,reason:'Stale'});
+    const fresh=await executeNative(target.db,human,'refresh_refund_count',{countId:second.countId,reason:'Refresh'});
+    await executeNative(target.db,human,'reject_count',{countId:fresh.countId,reason:'Reinspect'});
+    const again=await executeNative(target.db,human,'refresh_refund_count',{countId:fresh.countId,reason:'Refresh again'});
+    const delta=await target.db.query<any>('SELECT counted-expected AS delta FROM physical_count_lines WHERE count_id=$1',[again.countId]);
+    expect(Number(delta[0].delta)).toBe(2);
+    await executeNative(target.db,{...human,id:'second-reviewer'},'approve_count',{countId:again.countId,reason:'Verified'});
+    await apply(latest);
+    expect(await stock()).toMatchObject({onHand:20});
+    expect(await apply(latest)).toEqual({duplicate:true});
+    expect(await executeNative(target.db,human,'refresh_refund_count',{countId:fresh.countId,reason:'Retry'})).toMatchObject({countId:again.countId,duplicate:true});
+  });
   it.each([{cancelled:false,refreshed:false},{cancelled:true,refreshed:false},{cancelled:false,refreshed:true},{cancelled:true,refreshed:true}])("does not credit approved refunds again before checkpoint retry %j", async({cancelled,refreshed})=>{
     const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
     const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');

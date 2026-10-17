@@ -197,7 +197,8 @@ export async function applyOrderLine(
       });
       const adjustment=await submitAdjustmentBatch(db,client,{type:'agent',id:run.agentId,companyId:run.companyId},deltas,
         JSON.stringify(['bc-refund',input.orderId,input.lineId,reversed]),
-        `BigCommerce refund ${input.orderId}/${input.lineId}: ${reversed} returned units; BOM ${bomId}`);
+        `BigCommerce refund ${input.orderId}/${input.lineId}: ${reversed} returned units; BOM ${bomId}`,false,
+        expansion.map(part=>({partId:ids.get(part.part.toLowerCase())!,quantity:part.quantity})));
       if(adjustment.status!=='applied')return {pendingApproval:true,...adjustment};
     }
     for (const part of expansion) {
