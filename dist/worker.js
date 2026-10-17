@@ -732,9 +732,9 @@ function floatSafeRemainder(val, step) {
   return ratio - roundedRatio;
 }
 var EVALUATING = /* @__PURE__ */ Symbol("evaluating");
-function defineLazy(object2, key, getter) {
+function defineLazy(object3, key, getter) {
   let value = void 0;
-  Object.defineProperty(object2, key, {
+  Object.defineProperty(object3, key, {
     get() {
       if (value === EVALUATING) {
         return void 0;
@@ -746,7 +746,7 @@ function defineLazy(object2, key, getter) {
       return value;
     },
     set(v) {
-      Object.defineProperty(object2, key, {
+      Object.defineProperty(object3, key, {
         value: v
         // configurable: true,
       });
@@ -9359,8 +9359,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text2) => {
-  return text2.charAt(0).toUpperCase() + text2.slice(1);
+var capitalizeFirstCharacter = (text3) => {
+  return text3.charAt(0).toUpperCase() + text3.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -15861,8 +15861,8 @@ function foldObjects(members2) {
   }
   const properties = {};
   const required2 = /* @__PURE__ */ new Set();
-  for (const object2 of objects) {
-    for (const key in object2.properties) {
+  for (const object3 of objects) {
+    for (const key in object3.properties) {
       if (Object.prototype.hasOwnProperty.call(properties, key))
         continue;
       const parts = [];
@@ -15876,18 +15876,18 @@ function foldObjects(members2) {
       const merged = parts.length === 1 ? parts[0] : foldObjects(parts) ?? { allOf: parts };
       assignProp(properties, key, merged);
     }
-    for (const key of object2.required ?? [])
+    for (const key of object3.required ?? [])
       required2.add(key);
   }
   const folded = { type: "object", properties };
   if (required2.size)
     folded.required = [...required2];
-  if (objects.every((object2) => object2.additionalProperties === false)) {
+  if (objects.every((object3) => object3.additionalProperties === false)) {
     folded.additionalProperties = false;
   } else {
     const constraints = [];
-    for (const object2 of objects) {
-      const constraint = undeclaredConstraint(object2);
+    for (const object3 of objects) {
+      const constraint = undeclaredConstraint(object3);
       if (constraint && !constraints.some((seen) => JSON.stringify(seen) === JSON.stringify(constraint)))
         constraints.push(constraint);
     }
@@ -28162,12 +28162,12 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
   const raw = firstQueryValue(value);
   if (raw === void 0 || raw === null || raw === "")
     return fallback;
-  const text2 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
-  if (!/^-?\d+$/.test(text2)) {
+  const text3 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!/^-?\d+$/.test(text3)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be an integer` });
     return fallback;
   }
-  const numeric = Number.parseInt(text2, 10);
+  const numeric = Number.parseInt(text3, 10);
   if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
     const range = min === 0 ? `between 0 and ${max}` : `between ${min} and ${max}`;
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be ${range}` });
@@ -42311,13 +42311,13 @@ function parseQuantity(value, options) {
   if (Math.abs(value) > MAX_MAGNITUDE) {
     throw new InputError(`${label2} is larger than this inventory can store.`);
   }
-  const scaled = value * SCALE_FACTOR;
-  if (Math.abs(scaled - Math.round(scaled)) > 1e-6) {
+  const scaled2 = value * SCALE_FACTOR;
+  if (Math.abs(scaled2 - Math.round(scaled2)) > 1e-6) {
     throw new InputError(
       `${label2} has more than ${QUANTITY_SCALE} decimal places. Stock is stored to ${QUANTITY_SCALE} decimals, and rounding it quietly is how a ledger stops being trustworthy.`
     );
   }
-  return Math.round(scaled) / SCALE_FACTOR;
+  return Math.round(scaled2) / SCALE_FACTOR;
 }
 function toNumber(value) {
   if (value === null || value === void 0) return 0;
@@ -42466,7 +42466,7 @@ function bucketsFor(entryType, quantity, outstanding) {
       return { quantityDelta: quantity, onHandDelta: quantity, onOrderDelta: 0 };
   }
 }
-async function appendEntry(db, input2) {
+async function appendEntry(db, input2, transactionClient) {
   if (input2.entryType !== "adjustment" && input2.quantity <= 0) {
     throw new InputError(`A ${input2.entryType} quantity must be greater than zero.`);
   }
@@ -42478,7 +42478,8 @@ async function appendEntry(db, input2) {
     throw new InputError("A reference is required: it is what makes this entry traceable.");
   }
   let attemptedKey;
-  const write2 = async () => db.transaction(async (client) => {
+  const transact = transactionClient ? async (fn) => fn(transactionClient) : db.transaction.bind(db);
+  const write2 = async () => transact(async (client) => {
     const part = await resolvePart(client, input2.part, {
       create: input2.createMissingPart === true,
       description: input2.description,
@@ -42538,7 +42539,7 @@ async function appendEntry(db, input2) {
   try {
     return await write2();
   } catch (error62) {
-    if (attemptedKey && error62?.code === UNIQUE_VIOLATION) {
+    if (!transactionClient && attemptedKey && error62?.code === UNIQUE_VIOLATION) {
       const key = attemptedKey;
       const existing = await db.transaction(async (client) => {
         const entry = await findByIdempotencyKey(client, key);
@@ -42757,9 +42758,9 @@ function optionalText(value, label2) {
   return trimmed;
 }
 function requiredText(value, label2) {
-  const text2 = optionalText(value, label2);
-  if (text2 === void 0) throw new InputError(`${label2} is required.`);
-  return text2;
+  const text3 = optionalText(value, label2);
+  if (text3 === void 0) throw new InputError(`${label2} is required.`);
+  return text3;
 }
 function provenanceOf(tool3, runCtx, extra) {
   return {
@@ -42903,6 +42904,407 @@ ${rows.map(stockSummary).join("\n")}`;
   };
 }
 
+// src/extraction.ts
+function object2(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError("Parameters must be an object.");
+  return value;
+}
+function text2(value, label2, max = 500) {
+  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) {
+    throw new InputError(`${label2} is required and must be printable text of at most ${max} characters.`);
+  }
+  return value.trim();
+}
+function scaled(value, label2 = "Amount", positive = false) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value >= 1e10 || positive && value === 0) throw new InputError(`${label2} must be a finite ${positive ? "positive" : "non-negative"} number below 10 billion.`);
+  const scaled2 = Math.round(value * 1e4);
+  if (Math.abs(value * 1e4 - scaled2) > 1e-4) throw new InputError(`${label2} supports at most four decimal places.`);
+  return BigInt(scaled2);
+}
+function vendorKey(value) {
+  const vendor = text2(value, "Vendor", 63).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(vendor)) throw new InputError("Vendor must be a lowercase vendor key.");
+  return vendor;
+}
+function extraction(value) {
+  const x = object2(value);
+  const orderNumber = text2(x.orderNumber, "Order number");
+  if (!Array.isArray(x.lines) || !x.lines.length || x.lines.length > 500) throw new InputError("An extraction needs 1\u2013500 lines.");
+  scaled(x.subtotal, "Subtotal");
+  let orderDate;
+  if (x.orderDate !== void 0) {
+    orderDate = text2(x.orderDate, "Order date", 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(orderDate) || new Date(orderDate).toISOString().slice(0, 10) !== orderDate) throw new InputError("Order date must be a real ISO date.");
+  }
+  const lines = x.lines.map((value2) => {
+    const line = object2(value2);
+    const vendorPartNumber = text2(line.vendorPartNumber, "Part number", 128);
+    parsePartRef(`vendor:${vendorPartNumber}`);
+    scaled(line.quantity, "Quantity", true);
+    scaled(line.unitPrice, "Unit price");
+    if (line.lineTotal !== void 0) scaled(line.lineTotal, "Line total");
+    return {
+      vendorPartNumber,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      ...line.description === void 0 ? {} : { description: text2(line.description, "Description") },
+      ...line.lineTotal === void 0 ? {} : { lineTotal: line.lineTotal }
+    };
+  });
+  return { orderNumber, ...orderDate ? { orderDate } : {}, subtotal: x.subtotal, lines };
+}
+function lineKey(line) {
+  return JSON.stringify([line.vendorPartNumber.toLowerCase(), scaled(line.quantity).toString(), scaled(line.unitPrice).toString()]);
+}
+function disagreements(a, b) {
+  const reasons = [];
+  if (a.orderNumber.toLowerCase() !== b.orderNumber.toLowerCase()) reasons.push("Order numbers differ");
+  if (a.orderDate !== b.orderDate) reasons.push("Order dates differ");
+  if (scaled(a.subtotal) !== scaled(b.subtotal)) reasons.push("Subtotals differ");
+  if (JSON.stringify(a.lines.map(lineKey).sort()) !== JSON.stringify(b.lines.map(lineKey).sort())) reasons.push("Part numbers, quantities or prices differ");
+  return reasons;
+}
+function reconcile(x) {
+  let total = 0n;
+  const reasons = [];
+  for (const line of x.lines) {
+    const extended2 = (scaled(line.quantity) * scaled(line.unitPrice) + 5000n) / 10000n;
+    total += extended2;
+    if (line.lineTotal !== void 0 && scaled(line.lineTotal) !== extended2) reasons.push("Printed line total differs from quantity \xD7 unit price");
+  }
+  if (total !== scaled(x.subtotal)) reasons.push("Line totals do not reconcile to the subtotal (tax and shipping excluded)");
+  return reasons;
+}
+
+// src/parsers/table.ts
+function parseTable(raw) {
+  const orderNumber = raw.match(/^Order(?:\s+Number\s*:|\s*#\s*:?|\s*:)\s*([\w-]+)\s*$/mi)?.[1];
+  const orderDate = raw.match(/^(?:Order Date|Date)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/mi)?.[1];
+  const subtotal = raw.match(/^Subtotal\s*:?\s*\$?([\d,]+\.\d{2,4})\s*$/mi)?.[1];
+  const rows = raw.split(/\r?\n/);
+  const start = rows.findIndex((row) => /^Part(?: Number)?\s*\|\s*Description\s*\|\s*Quantity\s*\|\s*Unit Price\s*\|\s*Total\s*$/i.test(row.trim()));
+  if (start < 0) throw new InputError("Unrecognised vendor line-item table; independent review required.");
+  const lines = [];
+  for (const row of rows.slice(start + 1)) {
+    if (!row.trim()) continue;
+    if (/^Subtotal\b/i.test(row.trim())) break;
+    const cells2 = row.split("|").map((x) => x.trim());
+    if (cells2.length !== 5) throw new InputError("Unrecognised vendor line item; independent review required.");
+    const money = (s) => /^\$?[\d,]+\.\d{2,4}$/.test(s) ? Number(s.replace(/[$,]/g, "")) : NaN;
+    lines.push({ vendorPartNumber: cells2[0], description: cells2[1], quantity: Number(cells2[2]), unitPrice: money(cells2[3]), lineTotal: money(cells2[4]) });
+  }
+  return extraction({ orderNumber, orderDate, subtotal: subtotal ? Number(subtotal.replace(/,/g, "")) : void 0, lines });
+}
+
+// src/parsers/mcmaster.ts
+function cells(row) {
+  const trimmed = row.trim();
+  if (trimmed.length < 2 || !trimmed.startsWith("|") || !trimmed.endsWith("|")) return void 0;
+  return trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+}
+function amount(raw, label2) {
+  const matched = /^\$?([\d,]+\.\d{2,4})$/.exec(raw.trim());
+  if (!matched) throw new InputError(`Unreadable McMaster ${label2} "${raw.trim()}"; independent review required.`);
+  return Number(matched[1].replace(/,/g, ""));
+}
+function unitPrice(raw) {
+  const matched = /^(\$?[\d,]+\.\d{2,4})(?:\s+(?:per\s+)?(?:pack|each))?$/i.exec(raw.trim());
+  if (!matched) throw new InputError(`Unreadable McMaster unit price "${raw.trim()}"; independent review required.`);
+  return amount(matched[1], "unit price");
+}
+function ordered(raw) {
+  const trimmed = raw.trim();
+  const pack = /^(\d+)\s+packs?\s+of\s+(\d+)$/i.exec(trimmed);
+  if (pack) return { quantity: Number(pack[1]), packSize: Number(pack[2]) };
+  const plain = /^(\d+)(?:\s+(?:packs?|each))?$/i.exec(trimmed);
+  if (plain) return { quantity: Number(plain[1]) };
+  throw new InputError(`Unreadable McMaster quantity "${trimmed}"; independent review required.`);
+}
+function partLink(raw) {
+  const matched = /^(.*?)\s*([0-9A-Za-z]+)\[\]\([^)]*\)$/.exec(raw.trim());
+  return matched ? { vendorPartNumber: matched[2], description: matched[1].trim() } : void 0;
+}
+function describe3(description, packSize) {
+  const text3 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
+  return text3 ? text3 : void 0;
+}
+function merchandise(raw) {
+  const matched = /^\|(?:\s*\|)*\s*Merchandise\s*\|\s*(\$?[\d,]+\.\d{2,4})\s*\|$/mi.exec(raw);
+  return matched ? amount(matched[1], "merchandise subtotal") : void 0;
+}
+function isConfirmation(raw) {
+  return /\[\]\(https?:\/\/[^)]*mcmaster\.com\/order-history\/order\/[^)]*\)/i.test(raw);
+}
+function receiptHeader(rows) {
+  return rows.findIndex((row) => {
+    const row8 = cells(row);
+    return !!row8 && row8.length === 8 && /^Line$/i.test(row8[0]) && /^Product$/i.test(row8[2]) && /^Ordered$/i.test(row8[3]) && /^Price$/i.test(row8[6]) && /^Total$/i.test(row8[7]);
+  });
+}
+function parseConfirmation(raw) {
+  const orderNumber = /^\|\s*([0-9A-Za-z][0-9A-Za-z-]*)\[\]\(https?:\/\/[^)]*mcmaster\.com\/order-history\/order\/[^)]*\)\s*\|$/mi.exec(raw)?.[1];
+  const date5 = /\bOrder date\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i.exec(raw);
+  const orderDate = date5 ? `${date5[3]}-${date5[1].padStart(2, "0")}-${date5[2].padStart(2, "0")}` : void 0;
+  const lines = [];
+  for (const row of raw.split(/\r?\n/)) {
+    const cell = cells(row);
+    if (!cell || cell.length !== 5 || !/^\d+$/.test(cell[0])) continue;
+    const part = partLink(cell[1]);
+    if (!part) continue;
+    const { quantity, packSize } = ordered(cell[2]);
+    lines.push({
+      vendorPartNumber: part.vendorPartNumber,
+      quantity,
+      unitPrice: unitPrice(cell[3]),
+      lineTotal: amount(cell[4], "line total"),
+      ...describe3(part.description, packSize) ? { description: describe3(part.description, packSize) } : {}
+    });
+  }
+  if (!lines.length) throw new InputError("No McMaster confirmation line items were recognised; independent review required.");
+  return extraction({ orderNumber, orderDate, subtotal: merchandise(raw), lines });
+}
+function parseReceipt(raw, header) {
+  const rows = raw.split(/\r?\n/);
+  const orderNumber = /^\|\s*Purchase Order\s*\|\s*([0-9A-Za-z][0-9A-Za-z-]*)\s*\|$/mi.exec(raw)?.[1];
+  const lines = [];
+  for (const row of rows.slice(header + 1)) {
+    const cell = cells(row);
+    if (!cell || cell.length !== 8 || !/^\d+$/.test(cell[0])) continue;
+    const part = partLink(cell[1]);
+    if (!part) continue;
+    const { quantity, packSize } = ordered(cell[3]);
+    const stated = /\bpacks?\s+of\s+\d+\b/i.test(cell[2]);
+    const described = describe3(cell[2], stated ? void 0 : packSize);
+    lines.push({
+      vendorPartNumber: part.vendorPartNumber,
+      quantity,
+      unitPrice: unitPrice(cell[6]),
+      lineTotal: amount(cell[7], "line total"),
+      ...described ? { description: described } : {}
+    });
+  }
+  if (!lines.length) throw new InputError("No McMaster receipt line items were recognised; independent review required.");
+  return extraction({ orderNumber, subtotal: merchandise(raw), lines });
+}
+function parseMcMaster(raw) {
+  const header = receiptHeader(raw.split(/\r?\n/));
+  if (header >= 0) return parseReceipt(raw, header);
+  if (isConfirmation(raw)) return parseConfirmation(raw);
+  return parseTable(raw);
+}
+var mcmaster = {
+  vendor: "mcmaster",
+  matches: (email3) => /\bMcMaster-Carr\b/i.test(email3) || /\bmcmaster\.com\b/i.test(email3),
+  parse: parseMcMaster
+};
+
+// src/parsers/sendcutsend.ts
+function sendCutSendOrderNumber(raw) {
+  return /^ORDER\s+([0-9A-Za-z][0-9A-Za-z-]*)\s*$/mi.exec(raw)?.[1] ?? /\bSendCutSend\s+Order\s+([0-9A-Za-z][0-9A-Za-z-]*)\b/i.exec(raw)?.[1];
+}
+function parseSendCutSend(raw) {
+  try {
+    return parseTable(raw);
+  } catch (error62) {
+    const orderNumber = sendCutSendOrderNumber(raw);
+    if (orderNumber) {
+      throw new InputError(`SendCutSend order ${orderNumber} prints no line items in the email body; its itemised invoice is a PDF attachment, so quantities and prices need independent extraction and review before they can affect stock.`);
+    }
+    throw error62;
+  }
+}
+var sendcutsend = {
+  vendor: "sendcutsend",
+  matches: (email3) => /\bSendCutSend\b/i.test(email3) || /\bsendcutsend\.com\b/i.test(email3),
+  parse: parseSendCutSend
+};
+
+// src/parsers/index.ts
+var parsers = [mcmaster, sendcutsend];
+function selectParser(raw, vendor, enabled, registry2 = parsers) {
+  const matches = registry2.filter((p) => (!enabled || enabled.includes(p.vendor)) && p.matches(raw));
+  if (vendor) return matches.find((p) => p.vendor === vendor);
+  return matches.length === 1 ? matches[0] : void 0;
+}
+
+// src/intake.ts
+function provenance(run, source) {
+  return { source, agentId: run.agentId, runId: run.runId, companyId: run.companyId, projectId: run.projectId };
+}
+function independent(input2, agent) {
+  try {
+    const evidence = object2(input2.independentExtraction);
+    const primaryModel = text2(input2.agentModel, "Primary model").toLowerCase();
+    const model = text2(evidence.model, "Independent model").toLowerCase();
+    const extractionId = text2(evidence.extractionId, "Independent extraction run");
+    if (model === primaryModel) return { reasons: ["Unsupported vendor requires extraction by a different model"] };
+    const second = extraction(evidence.extraction);
+    return { extraction: second, evidence: { model, primaryModel, extractionId }, reasons: [...disagreements(agent, second), ...reconcile(second)] };
+  } catch {
+    return { reasons: ["Unsupported vendor requires an independent second-model extraction, model identities and extraction run id"] };
+  }
+}
+async function lock(client, value) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [value]);
+}
+async function disposition(client, messageId) {
+  const { rows } = await client.query(`SELECT i.message_id, COALESCE(i.order_id, r.resolved_order_id) AS order_id, i.review_id, r.status AS review_status
+    FROM email_intake i LEFT JOIN review_queue r ON r.id=i.review_id WHERE i.message_id=$1`, [messageId]);
+  const row = rows[0];
+  return row ? { status: row.order_id ? "recorded" : row.review_status, orderId: row.order_id, reviewItemId: row.review_id, duplicate: true } : void 0;
+}
+async function previousOrder(client, vendor, order) {
+  const result = await client.query("SELECT id, vendor_order_number, order_date::text, subtotal FROM orders WHERE vendor=$1 AND lower(vendor_order_number)=lower($2)", [vendor, order.orderNumber]);
+  const old = result.rows[0];
+  if (!old) return void 0;
+  const lines = await client.query(`SELECT p.vendor_part_number, l.quantity, l.unit_price FROM order_lines l JOIN parts p ON p.id=l.part_id WHERE l.order_id=$1 ORDER BY l.line_number`, [old.id]);
+  const stored = extraction({ orderNumber: old.vendor_order_number, ...old.order_date ? { orderDate: old.order_date } : {}, subtotal: Number(old.subtotal), lines: lines.rows.map((l) => ({ vendorPartNumber: l.vendor_part_number, quantity: Number(l.quantity), unitPrice: Number(l.unit_price) })) });
+  return { orderId: old.id, conflicts: disagreements(stored, order).filter((reason) => reason !== "Order dates differ" || !!(stored.orderDate && order.orderDate)) };
+}
+async function recordOrder(db, client, vendor, order, messageId, rawText, run, reviewItemId) {
+  await lock(client, JSON.stringify(["order", vendor, order.orderNumber.toLowerCase()]));
+  const previous = await previousOrder(client, vendor, order);
+  if (previous?.conflicts.length) throw new InputError("This vendor order is already recorded with different contents. Existing stock was not changed.");
+  if (previous) return { orderId: previous.orderId, duplicate: true };
+  const created = await client.query(`INSERT INTO orders (vendor, vendor_order_number, order_date, subtotal, source_message_id, raw_email)
+    VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [vendor, order.orderNumber, order.orderDate ?? null, order.subtotal, messageId, rawText]);
+  const orderId = created.rows[0].id;
+  const numbered = order.lines.map((line, i) => ({ line, number: i + 1 })).sort((a, b) => a.line.vendorPartNumber.toLowerCase().localeCompare(b.line.vendorPartNumber.toLowerCase()) || a.number - b.number);
+  for (const { line, number: number4 } of numbered) {
+    const result = await appendEntry(db, {
+      part: parsePartRef(`${vendor}:${line.vendorPartNumber}`),
+      entryType: "purchase",
+      quantity: line.quantity,
+      unitCost: line.unitPrice,
+      reference: order.orderNumber,
+      idempotencyScope: ["purchase", orderId, String(number4)],
+      provenance: { ...provenance(run, reviewItemId ? "resolve_review_item" : "submit_order_email"), messageId, rawText, orderId, line: number4, ...reviewItemId ? { reviewItemId } : {} },
+      createdBy: run.agentId,
+      createMissingPart: true,
+      description: line.description
+    }, client);
+    await client.query(`INSERT INTO order_lines (order_id,line_number,part_id,quantity,unit_price,line_total)
+      VALUES ($1,$2,$3,$4,$5,round($4::numeric*$5::numeric,4))`, [orderId, number4, result.part.partId, line.quantity, line.unitPrice]);
+  }
+  return { orderId, duplicate: false };
+}
+async function submitOrderEmail(ctx, raw, run) {
+  const input2 = object2(raw);
+  const messageId = text2(input2.messageId, "Message id");
+  text2(input2.rawText, "Raw email", 1e6);
+  const rawText = input2.rawText;
+  const vendorHint = input2.vendor === void 0 ? void 0 : vendorKey(input2.vendor);
+  const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+  const parser = selectParser(rawText, vendorHint, enabled);
+  const vendor = parser?.vendor ?? vendorHint ?? "unknown";
+  let agent;
+  let verifier;
+  let evidence;
+  const reasons = [];
+  if (vendorHint && parsers.some((p) => p.vendor === vendorHint) && !parser) reasons.push("The named vendor parser is disabled or does not recognise this email");
+  try {
+    agent = extraction(input2.agentExtraction);
+    reasons.push(...reconcile(agent));
+  } catch {
+    reasons.push("Agent extraction is invalid or incomplete");
+  }
+  if (parser) {
+    try {
+      verifier = parser.parse(rawText);
+      reasons.push(...reconcile(verifier));
+    } catch (error62) {
+      reasons.push(error62 instanceof InputError ? error62.message : "Vendor parser could not safely read this email layout");
+    }
+    if (agent && verifier) reasons.push(...disagreements(agent, verifier));
+  } else if (agent) {
+    const second = independent(input2, agent);
+    verifier = second.extraction;
+    evidence = second.evidence;
+    reasons.push(...second.reasons);
+    if (!vendorHint) reasons.push("Vendor must be specified when no parser identifies the email");
+    if (vendorHint && !enabled.includes(vendorHint) && ["mcmaster", "sendcutsend"].includes(vendorHint)) reasons.push("Vendor parser is disabled in company configuration");
+  }
+  const db = await openStore(ctx, run.companyId);
+  const result = await db.transaction(async (client) => {
+    await lock(client, JSON.stringify(["message", messageId]));
+    const existing = await disposition(client, messageId);
+    if (existing) return existing;
+    let orderId = null;
+    let reviewItemId = null;
+    let duplicate = false;
+    if (!reasons.length && verifier) {
+      await lock(client, JSON.stringify(["order", vendor, verifier.orderNumber.toLowerCase()]));
+      const previous = await previousOrder(client, vendor, verifier);
+      if (previous?.conflicts.length) reasons.push("Previously recorded order has different contents");
+    }
+    if (!reasons.length && agent && verifier) {
+      const order = await recordOrder(db, client, vendor, verifier, messageId, rawText, run);
+      orderId = order.orderId;
+      duplicate = order.duplicate;
+    } else {
+      const queued = await client.query(`INSERT INTO review_queue (vendor,source_message_id,reason,parser_extraction,agent_extraction,raw_email)
+        VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6) RETURNING id`, [vendor, messageId, [...new Set(reasons)].join("; "), JSON.stringify(verifier ?? null), JSON.stringify(input2.agentExtraction ?? null), rawText]);
+      reviewItemId = queued.rows[0].id;
+    }
+    await client.query(`INSERT INTO email_intake (message_id,vendor,raw_email,agent_extraction,verifier_extraction,provenance,order_id,review_id)
+      VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8)`, [messageId, vendor, rawText, JSON.stringify(input2.agentExtraction ?? null), JSON.stringify(verifier ?? null), JSON.stringify({ ...provenance(run, "submit_order_email"), parser: parser?.vendor, independent: evidence }), orderId, reviewItemId]);
+    return { status: orderId ? "recorded" : "open", orderId, reviewItemId, duplicate };
+  });
+  return { content: result.orderId ? result.duplicate ? "Order already recorded; stock unchanged." : "Verified order recorded as on order." : "Email is in review; no ledger entries were written.", data: result };
+}
+async function listReviewQueue(ctx, raw, run) {
+  const input2 = object2(raw);
+  const limit = input2.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new InputError("Limit must be an integer from 1 to 200.");
+  const vendor = input2.vendor === void 0 ? null : vendorKey(input2.vendor);
+  const db = await openStore(ctx, run.companyId);
+  const items = await db.query(`SELECT id,vendor,source_message_id,reason,parser_extraction,agent_extraction,raw_email,created_at,
+    (SELECT provenance FROM email_intake i WHERE i.review_id=review_queue.id) AS intake_provenance
+    FROM review_queue WHERE status='open' AND ($1::text IS NULL OR vendor=$1) ORDER BY created_at,id LIMIT $2`, [vendor, limit]);
+  return { content: `${items.length} email(s) awaiting review.`, data: { items, count: items.length } };
+}
+async function resolveReviewItem(ctx, raw, run) {
+  const input2 = object2(raw);
+  const id = text2(input2.reviewItemId, "Review item id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new InputError("Review item id must be a UUID.");
+  const resolution = text2(input2.resolution, "Resolution");
+  if (!["accept", "accept_with_corrections", "reject"].includes(resolution)) throw new InputError("Unknown review resolution.");
+  const note = text2(input2.note, "Resolution note");
+  const db = await openStore(ctx, run.companyId);
+  const result = await db.transaction(async (client) => {
+    const rows = await client.query("SELECT * FROM review_queue WHERE id=$1 FOR UPDATE", [id]);
+    const item = rows.rows[0];
+    if (!item) throw new InputError("Review item was not found.");
+    if (item.status !== "open") {
+      if (item.status !== (resolution === "reject" ? "rejected" : resolution === "accept" ? "accepted" : "accepted_with_corrections")) throw new InputError("Review item already has a different final resolution.");
+      return { reviewItemId: id, status: item.status, duplicate: true };
+    }
+    let selected;
+    let orderId;
+    if (resolution !== "reject") {
+      selected = extraction(resolution === "accept_with_corrections" ? input2.corrections : item.agent_extraction);
+      const reasons = reconcile(selected);
+      if (resolution === "accept" && item.parser_extraction) {
+        const saved = extraction(item.parser_extraction);
+        reasons.push(...reconcile(saved), ...disagreements(selected, saved));
+      }
+      const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+      const parser = selectParser(item.raw_email, item.vendor, enabled);
+      if (!parser || !item.parser_extraction) reasons.push(...independent(input2, selected).reasons);
+      if (item.vendor === "unknown") reasons.push("Reject and resubmit with an explicit vendor");
+      if (["mcmaster", "sendcutsend"].includes(item.vendor) && !enabled.includes(item.vendor)) reasons.push("Vendor parser is disabled");
+      if (reasons.length) throw new InputError(`Cannot resolve: ${reasons.join("; ")}.`);
+      const order = await recordOrder(db, client, item.vendor, selected, item.source_message_id, item.raw_email, run, id);
+      orderId = order.orderId;
+    }
+    const status = resolution === "reject" ? "rejected" : resolution === "accept" ? "accepted" : "accepted_with_corrections";
+    await client.query(`UPDATE review_queue SET status=$2,resolution_note=$3,resolved_at=now(),resolved_by=$4,
+      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, "resolve_review_item"), independentExtraction: input2.independentExtraction, agentModel: input2.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
+    return { reviewItemId: id, status, orderId, duplicate: false };
+  });
+  return { content: `Review item ${result.status}.`, data: result };
+}
+
 // src/tools.ts
 var PART_ID = {
   type: "string",
@@ -42937,6 +43339,8 @@ var TOOL_DECLARATIONS = [
           description: "The full plain-text body of the order email.",
           minLength: 1
         },
+        agentModel: { type: "string", description: "Primary extraction model identity; required for unsupported vendors." },
+        independentExtraction: { type: "object", description: "Unsupported vendors require {model, extractionId, extraction}, extracted independently by a different model. Model and run identities are caller attestations, retained for audit." },
         agentExtraction: {
           type: "object",
           description: "What you read from the email. This is one half of the double extraction, so extract it from the email itself rather than from a parser's output.",
@@ -43077,9 +43481,11 @@ var TOOL_DECLARATIONS = [
           type: "object",
           description: "The corrected extraction. Required when the resolution is accept_with_corrections."
         },
-        note: { type: "string" }
+        agentModel: { type: "string" },
+        independentExtraction: { type: "object", description: "Required for accepting unsupported vendors; same evidence shape as submit_order_email." },
+        note: { type: "string", minLength: 1, description: "Required explanation of the decision." }
       },
-      required: ["reviewItemId", "resolution"]
+      required: ["reviewItemId", "resolution", "note"]
     }
   },
   {
@@ -43189,9 +43595,15 @@ function toolError(ctx, toolName, companyId, error62) {
   });
   return { error: message2, content: message2, data: { error: message2 } };
 }
-var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock"];
+var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item"];
 async function dispatch(ctx, declaration, params2, runCtx) {
   switch (declaration.name) {
+    case "submit_order_email":
+      return submitOrderEmail(ctx, params2, runCtx);
+    case "list_review_queue":
+      return listReviewQueue(ctx, params2, runCtx);
+    case "resolve_review_item":
+      return resolveReviewItem(ctx, params2, runCtx);
     case "record_receipt":
       return recordReceipt(ctx, params2, runCtx);
     case "record_adjustment":

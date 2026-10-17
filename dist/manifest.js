@@ -69,6 +69,8 @@ var TOOL_DECLARATIONS = [
           description: "The full plain-text body of the order email.",
           minLength: 1
         },
+        agentModel: { type: "string", description: "Primary extraction model identity; required for unsupported vendors." },
+        independentExtraction: { type: "object", description: "Unsupported vendors require {model, extractionId, extraction}, extracted independently by a different model. Model and run identities are caller attestations, retained for audit." },
         agentExtraction: {
           type: "object",
           description: "What you read from the email. This is one half of the double extraction, so extract it from the email itself rather than from a parser's output.",
@@ -209,9 +211,11 @@ var TOOL_DECLARATIONS = [
           type: "object",
           description: "The corrected extraction. Required when the resolution is accept_with_corrections."
         },
-        note: { type: "string" }
+        agentModel: { type: "string" },
+        independentExtraction: { type: "object", description: "Required for accepting unsupported vendors; same evidence shape as submit_order_email." },
+        note: { type: "string", minLength: 1, description: "Required explanation of the decision." }
       },
-      required: ["reviewItemId", "resolution"]
+      required: ["reviewItemId", "resolution", "note"]
     }
   },
   {

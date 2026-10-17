@@ -11,6 +11,7 @@ import { CONFIG_KEYS, DEFAULT_DATABASE_SCHEMA, SETTINGS_PATH } from "./constants
 import { closeAllDatabases } from "./db.js";
 import { OperatorFacingError } from "./errors.js";
 import { getStock, recordAdjustment, recordReceipt } from "./handlers.js";
+import { submitOrderEmail, listReviewQueue, resolveReviewItem } from "./intake.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
 
 /**
@@ -97,7 +98,7 @@ export function toolError(
  * tool named here that still throws `NotImplementedError`, or one missing
  * from it that works, means the two have drifted.
  */
-export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock"] as const;
+export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item"] as const;
 
 export async function dispatch(
   ctx: PluginContext,
@@ -106,6 +107,12 @@ export async function dispatch(
   runCtx: ToolRunContext,
 ): Promise<ToolResult> {
   switch (declaration.name) {
+    case "submit_order_email":
+      return submitOrderEmail(ctx, params, runCtx);
+    case "list_review_queue":
+      return listReviewQueue(ctx, params, runCtx);
+    case "resolve_review_item":
+      return resolveReviewItem(ctx, params, runCtx);
     case "record_receipt":
       return recordReceipt(ctx, params, runCtx);
     case "record_adjustment":

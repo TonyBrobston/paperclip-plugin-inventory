@@ -40,13 +40,13 @@ describe("tool registration", () => {
 
   it("says which phase an unimplemented tool is waiting on", async () => {
     const result = await harness.executeTool<{ error?: string }>(
-      "submit_order_email",
+      "record_sale",
       {},
       { companyId: COMPANY_ID },
     );
     // A tool that is not built yet should read as "not built yet" rather than
     // as a crash, so an agent stops instead of retrying.
-    expect(result.error).toContain("phase 3");
+    expect(result.error).toContain("phase 5");
   });
 
   it("keeps IMPLEMENTED_TOOLS honest about which tools have a handler", async () => {
@@ -71,9 +71,9 @@ describe("tool registration", () => {
     // The flip side: a phase number left behind on a tool that now works.
     for (const declaration of TOOL_DECLARATIONS) {
       if ((IMPLEMENTED_TOOLS as readonly string[]).includes(declaration.name)) {
-        expect(declaration.phase, `${declaration.name} works, so its phase should be 2`).toBe(2);
+        expect(declaration.phase, `${declaration.name} works, so its phase should be 2`).toBeLessThanOrEqual(3);
       } else {
-        expect(declaration.phase).toBeGreaterThan(2);
+        expect(declaration.phase).toBeGreaterThan(3);
       }
     }
   });
