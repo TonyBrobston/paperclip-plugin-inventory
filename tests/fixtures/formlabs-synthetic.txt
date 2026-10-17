@@ -1,0 +1,14 @@
+Formlabs
+From: orders@formlabs.com
+Order confirmation
+Order Number: SYNTH-FORMLABS-100
+Order Date: 2026-10-16
+Order details
+Synthetic test material
+SKU: SYNTH-FORMLABS-001
+Quantity: 2
+Unit price: $5.00
+Line total: $10.00
+Subtotal: $10.00
+Shipping: $2.00
+Tax: $1.00

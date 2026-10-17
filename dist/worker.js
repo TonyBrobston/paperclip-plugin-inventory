@@ -43559,6 +43559,53 @@ function reconcile(x) {
   return reasons;
 }
 
+// src/parsers/item-blocks.ts
+init_errors();
+function parseItemBlocks(raw, identifier) {
+  const orderNumber = /^Order(?: number| #)?\s*:\s*([\w-]+)\s*$/mi.exec(raw)?.[1];
+  const orderDate = /^Order date:\s*(\d{4}-\d{2}-\d{2})\s*$/mi.exec(raw)?.[1];
+  const subtotals = [...raw.matchAll(/^(?:Items subtotal|Subtotal):\s*\$([\d,]+\.\d{2})\s*$/gmi)];
+  if (subtotals.length !== 1) throw new InputError("Expected one merchandise subtotal; complete order review required.");
+  const rows = raw.split(/\r?\n/);
+  const start = rows.findIndex((row) => /^Order details\s*$/i.test(row));
+  const end = rows.findIndex((row, i) => i > start && /^(?:Items subtotal|Subtotal):/i.test(row));
+  if (start < 0 || end < 0) throw new InputError("Missing itemised order details; independent review required.");
+  const items = rows.slice(start + 1, end).join("\n").trim().split(/\n\s*\n/);
+  const money = (value) => Number(value.replace(/,/g, ""));
+  const lines = items.map((item) => {
+    const pattern = new RegExp(`^([^\\n]+)\\n${identifier}: ([A-Za-z0-9_-]+)\\nQuantity: ([0-9]+)\\nUnit price: \\$([0-9,]+\\.[0-9]{2})\\nLine total: \\$([0-9,]+\\.[0-9]{2})$`, "i");
+    const m = pattern.exec(item);
+    if (!m) throw new InputError(`Incomplete item or missing ${identifier}; independent review required.`);
+    return { description: m[1], vendorPartNumber: m[2], quantity: Number(m[3]), unitPrice: money(m[4]), lineTotal: money(m[5]) };
+  });
+  return extraction({ orderNumber, ...orderDate ? { orderDate } : {}, subtotal: money(subtotals[0][1]), lines });
+}
+
+// src/parsers/amazon.ts
+init_errors();
+var amazon = {
+  vendor: "amazon",
+  matches: (raw) => /\bamazon\.(?:com|co\.uk)\b/i.test(raw) || /^Amazon\s*$/mi.test(raw),
+  parse(raw) {
+    if (/\b(?:shipped|shipment|arriving|dispatched|split order|part of your order|items? in this delivery)\b/i.test(raw)) {
+      throw new InputError("Amazon shipment or split-order email requires review of the complete order; no partial purchase was recorded.");
+    }
+    if (!/^Order confirmation\s*$/mi.test(raw)) throw new InputError("Amazon requires an itemised order confirmation with explicit part identifiers; independent review required.");
+    return parseItemBlocks(raw, "ASIN");
+  }
+};
+
+// src/parsers/formlabs.ts
+init_errors();
+var formlabs = {
+  vendor: "formlabs",
+  matches: (raw) => /\bFormlabs\b/i.test(raw) || /\bformlabs\.com\b/i.test(raw),
+  parse(raw) {
+    if (/\b(?:shipment|shipped|partial delivery)\b/i.test(raw)) throw new InputError("Formlabs shipment email requires the complete itemised order for review.");
+    return parseItemBlocks(raw, "SKU");
+  }
+};
+
 // src/parsers/table.ts
 init_errors();
 function parseTable(raw) {
@@ -43706,7 +43753,7 @@ var sendcutsend = {
 };
 
 // src/parsers/index.ts
-var parsers = [mcmaster, sendcutsend];
+var parsers = [mcmaster, sendcutsend, amazon, formlabs];
 function selectParser(raw, vendor, enabled, registry2 = parsers) {
   const matches = registry2.filter((p) => (!enabled || enabled.includes(p.vendor)) && p.matches(raw));
   if (vendor) return matches.find((p) => p.vendor === vendor);
