@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   applyOrderLine,
   flushStock,
   sellableInTransaction,
   type OrderLineSnapshot,
 } from "../src/bridge.js";
+import { bigcommerceClient } from "../src/bigcommerce.js";
+import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { appendEntry, readStock } from "../src/ledger.js";
 import { synchronizeBoms } from "../src/bom-sync.js";
 import { activeBomYaml, CATALOG, fakeConfigRepo, RUN } from "./support/boms.js";
@@ -60,7 +62,7 @@ integration("BigCommerce lifecycle", () => {
     });
     await sync();
   });
-  afterEach(async () => dropSchema(target));
+  afterEach(async () => { vi.unstubAllGlobals(); await dropSchema(target); });
   it("reserves once and subtracts commitments from sellable", async () => {
     await apply();
     expect(await apply()).toEqual({ duplicate: true });
@@ -93,6 +95,23 @@ integration("BigCommerce lifecycle", () => {
     expect(await apply()).toEqual({ stale: true });
     expect(await stock()).toMatchObject({ onHand: 20, committed: 0 });
   });
+  it.each([5, 6])("preserves live-status commitments until terminal status %i", async (terminal) => {
+    const binding = { type: "secret_ref", secretId: "synthetic-secret" };
+    const ctx = {
+      config: { get: async () => ({ bigcommerceStoreHash: "example", bigcommerceToken: binding, bigcommerceBridgeToken: binding }) },
+      secrets: { resolve: async () => "synthetic-token" },
+    } as unknown as PluginContext;
+    const api = await bigcommerceClient(ctx, "company");
+    for (const [index, status_id] of [11, 7, 8, 9, terminal].entries()) {
+      const order = { id: 900, status_id, date_modified: `2026-01-0${index + 1}T00:00:00Z` };
+      const product = { id: 1, product_id: 9001, type: "physical", quantity: 4, quantity_shipped: 0, quantity_refunded: 0 };
+      const response = (data: unknown) => new Response(JSON.stringify(data));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response([order])).mockResolvedValueOnce(response([product])).mockResolvedValueOnce(response(order)));
+      const { snapshots } = await api.orders("2026-01-01");
+      await applyOrderLine(target.db, snapshots[0]!, RUN);
+      expect(await stock()).toMatchObject({ onHand: 20, committed: status_id === terminal ? 0 : 8 });
+    }
+  });
   it("pins expansion across BOM updates", async () => {
     await apply();
     await sync(3);
@@ -108,8 +127,38 @@ integration("BigCommerce lifecycle", () => {
     await expect(
       apply({ ordered: 5, observedAt: "2026-01-02T00:00:00Z" }),
     ).rejects.toThrow("changed");
-    await expect(apply({ shipped: 1 })).rejects.toThrow("Conflicting");
+    await expect(apply({ ordered: 5 })).rejects.toThrow("changed");
     expect(await stock()).toMatchObject({ onHand: 20, committed: 8 });
+  });
+  it("accepts same-second shipment, refund and cancellation progress with retries", async () => {
+    await apply();
+    await apply({ shipped: 2 });
+    expect(await stock()).toMatchObject({ onHand: 16, committed: 4 });
+    expect(await apply({ shipped: 2 })).toEqual({ duplicate: true });
+    expect(await apply()).toEqual({ stale: true });
+    await apply({ shipped: 2, refunded: 1 });
+    expect(await stock()).toMatchObject({ onHand: 18, committed: 4 });
+    expect(await apply({ shipped: 2 })).toEqual({ stale: true });
+    await apply({ shipped: 2, refunded: 1, cancelled: true });
+    expect(await stock()).toMatchObject({ onHand: 20, committed: 0 });
+    expect(await apply({ shipped: 2, refunded: 1 })).toEqual({ stale: true });
+    expect(await apply({ shipped: 2, refunded: 1, cancelled: true })).toEqual({ duplicate: true });
+    expect(await target.db.query("SELECT * FROM ledger_entries WHERE entry_type = 'sale'")).toHaveLength(1);
+  });
+  it("ignores dominated same-second observations received in reverse order", async () => {
+    await apply({ shipped: 4, refunded: 2 });
+    for (const observation of [{ shipped: 2, refunded: 1 }, { shipped: 4 }, {}])
+      expect(await apply(observation)).toEqual({ stale: true });
+    expect(await stock()).toMatchObject({ onHand: 16, committed: 0 });
+  });
+  it("rejects incomparable same-second counters and terminal-state regressions", async () => {
+    await apply({ shipped: 2, refunded: 1 });
+    await expect(apply({ shipped: 3 })).rejects.toThrow("Conflicting");
+    await expect(apply({ shipped: 1, refunded: 2 })).rejects.toThrow("Conflicting");
+    await apply({ shipped: 2, refunded: 1, cancelled: true });
+    await expect(apply({ shipped: 3, refunded: 1 })).rejects.toThrow("Conflicting");
+    await expect(apply({ shipped: 2, refunded: 1, observedAt: "2026-01-02T00:00:00Z" })).rejects.toThrow("regressed");
+    expect(await stock()).toMatchObject({ onHand: 20, committed: 0 });
   });
   it("preview leaves no reservation, snapshot, or movement", async () => {
     await apply({ shipped: 2 }, true);

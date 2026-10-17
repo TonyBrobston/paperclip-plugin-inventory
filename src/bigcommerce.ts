@@ -127,7 +127,7 @@ export async function bigcommerceClient(ctx: PluginContext, companyId: string) {
             shipped: line.quantity_shipped,
             refunded: line.quantity_refunded,
             cancelled:
-              [5, 7, 8].includes(order.status_id) ||
+              [5, 6].includes(order.status_id) ||
               order.is_deleted === true,
             observedAt: new Date(order.date_modified).toISOString(),
           });

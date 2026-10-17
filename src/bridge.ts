@@ -71,35 +71,6 @@ export async function applyOrderLine(
       Date.parse(input.observedAt) < new Date(prior.observed_at).getTime()
     )
       return { stale: true };
-    if (
-      prior &&
-      Date.parse(input.observedAt) === new Date(prior.observed_at).getTime()
-    ) {
-      if (JSON.stringify(prior.snapshot) !== JSON.stringify(snapshot)) {
-        // JSONB reorders keys; compare canonical structures below instead.
-        const same = Object.keys(snapshot).every(
-          (k) =>
-            JSON.stringify(
-              k === "options"
-                ? prior.snapshot.options.map((o: OptionSelection) => [
-                    o.option,
-                    o.value,
-                  ])
-                : prior.snapshot[k],
-            ) ===
-            JSON.stringify(
-              k === "options"
-                ? snapshot.options.map((o) => [o.option, o.value])
-                : snapshot[k as keyof typeof snapshot],
-            ),
-        );
-        if (!same)
-          throw new InputError(
-            "Conflicting order snapshots at the same modification time; retry after the store settles.",
-          );
-      }
-      return { duplicate: true };
-    }
     const identity = {
       catalogKey: input.catalogKey,
       ordered: input.ordered,
@@ -121,6 +92,25 @@ export async function applyOrderLine(
         throw new InputError(
           "An existing order line changed product, quantity or options; resolve it explicitly before reconciliation.",
         );
+      }
+      if (Date.parse(input.observedAt) === new Date(prior.observed_at).getTime()) {
+        // BigCommerce timestamps have second precision. Compare cumulative
+        // progress rather than treating every different same-second read as a
+        // conflict. Never merge incomparable observations into invented state.
+        const before = [
+          Number(prior.shipped),
+          Number(prior.refunded),
+          Number(prior.snapshot.cancelled),
+        ];
+        const after = [input.shipped, input.refunded, Number(input.cancelled)];
+        if (after.every((value, i) => value === before[i]))
+          return { duplicate: true };
+        if (after.every((value, i) => value <= before[i]!))
+          return { stale: true };
+        if (!after.every((value, i) => value >= before[i]!))
+          throw new InputError(
+            "Conflicting order snapshots at the same modification time; resolve incomparable progress explicitly.",
+          );
       }
       if (
         input.shipped < prior.shipped ||

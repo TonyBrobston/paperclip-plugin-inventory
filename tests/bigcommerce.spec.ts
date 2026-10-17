@@ -50,3 +50,13 @@ it("resolves SKU stock writes to exactly one tracked variant", async () => {
   expect(fetcher.mock.calls[2]![0]).toContain("/products/9001/variants/2");
   expect(fetcher.mock.calls[2]![1]).toMatchObject({ method: "PUT", body: '{"inventory_level":3}' });
 });
+
+it.each([
+  [4, false], [5, true], [6, true], [7, false], [8, false],
+  [9, false], [11, false], [14, false],
+])("maps status %i cancellation to %s", async (status_id, cancelled) => {
+  const current = { ...order, status_id };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(response([current])).mockResolvedValueOnce(response([line])).mockResolvedValueOnce(response(current)));
+  const result = await (await bigcommerceClient(ctx, "company")).orders("2026-01-01");
+  expect(result.snapshots[0]).toMatchObject({ cancelled, shipped: 2, refunded: 1 });
+});
