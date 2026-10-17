@@ -266,3 +266,18 @@ that deployment-specific values come from config. It also keeps a generic
   operator can act on. Phase 2 found this with a `\u0000` delimiter inside an
   idempotency key; keys are JSON-encoded now, and free text from tool
   parameters is screened for control characters before it reaches a column.
+
+
+## Native UI verification — 2026-10-17
+
+Inventory must work inside Paperclip without Google authentication. Native UI implementation can use the installed page/widget and authenticated action contracts; live human-session acceptance remains a release gate.
+
+- Baseline: Inventory master `46778b6`; installed published SDK `2026.1012.0`. Running PID 1 launches `server/dist/index.js`; host package reports `0.3.1` and workspace SDK reports `1.0.0` (workspace version is not the published version).
+- Host compiled route SHA-256: plugins.js `5789c74210a1a6d18c7b1348c97cd7994ef3720eb898efe5d21c2a531d63c5a7`; authz.js `1340f50d6f737f7986185eaf06627804ffc39537d6af7cfceb6fc03bca40316a`. These match prior discovery.
+- `packages/shared/src/types/plugin.ts` supports `entrypoints.ui` (bundle directory), `ui.slots` with exportName and company routePath; slot constants include page, sidebar, dashboardWidget. UI loader is `ui/src/plugins/slots.tsx`; SDK UI hooks delegate into the host runtime.
+- `server/src/routes/plugins.ts` supports data/action bridges. Company scope is checked through assertCompanyAccess. Server-derived actorContext is sent only to actions. SDK worker-rpc-host.ts overwrites data/action params.companyId with RPC companyId and freezes action context. Use context.actor as write authority; reject null company, missing human IDs, system actors and client actor fields. Data handlers receive no authenticated user ID; use the host-authorized company only and keep them read-only.
+- Host membership checks reject cross-company callers and viewer writes; action actor context contains no role. Any finer approval policy belongs in the plugin and cannot trust a role supplied by the browser. UI writes and agent tools must share policy/domain services.
+- Executed existing host tests without host source changes: server plugin-routes-authz.test.ts + plugin-ui-static.test.ts: 42/42 PASS; UI bridge.test.ts + slots.test.ts + slots-loading.test.tsx: 18/18 PASS. Commands: from server, ../node_modules/.bin/vitest run --config vitest.config.ts src/__tests__/plugin-routes-authz.test.ts src/__tests__/plugin-ui-static.test.ts; from ui, equivalent command naming src/plugins/bridge.test.ts, src/plugins/slots.test.ts and src/plugins/slots-loading.test.tsx. Tests exercise route handlers with synthetic authenticated principals, not a live board session.
+- Remaining release checks: installed Inventory ready status; real UI asset loading and page/navigation/widget placement; real data/action round-trip with non-null human identity; viewer and cross-company denial; count/receiving workflows in the running native UI after Reed approval. Agent discovery returning 403 is an access boundary, not missing host capability. Do not impersonate board identities or alter Paperclip core.
+
+Active Sheets requirements elsewhere in this historical discovery document are superseded by SPEC.md. Remove stale active guidance as the native implementation lands; retain historical SQL migrations and ledger history.
