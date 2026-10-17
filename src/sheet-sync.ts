@@ -50,21 +50,28 @@ function parseCounts(rows: GridCell[][]): Count[] {
   }
   return counts;
 }
-function settingsOf(row: GridCell[]): Record<string, CellValue | null> {
-  validateInputCells(row.slice(11, 16), 'Inventory human settings');
-  const cells = values(row);
+function settingsOf(row: GridCell[], rowNumber: number): Record<string, CellValue | null> {
+  const label = `Inventory row ${rowNumber}`;
+  validateInputCells(row.slice(11, 16), `${label} human settings`);
+  const cells = row.map(cell => {
+    try { return cellValue(cell); }
+    catch (error) {
+      if (error instanceof SheetError) throw new SheetError(`${label} human settings: ${error.message}`);
+      throw error;
+    }
+  });
   const result: Record<string, CellValue | null> = {};
   for (const [offset, name] of ['reorderPoint', 'targetQty', 'location', 'notes', 'active'].entries()) {
     const value = cells[11 + offset];
     if (value === undefined || value === '') { result[name] = null; continue; }
     if (offset < 2) {
-      const qty = parseQuantity(value, { label: name });
-      if (qty < 0) throw new SheetError(`${name} cannot be negative.`);
+      const qty = parseQuantity(value, { label: `${label} ${name}` });
+      if (qty < 0) throw new SheetError(`${label} ${name} cannot be negative.`);
       result[name] = qty;
     } else if (offset === 4) {
-      if (typeof value !== 'boolean') throw new SheetError('Active must be a checkbox boolean.');
+      if (typeof value !== 'boolean') throw new SheetError(`${label} active must be a checkbox boolean.`);
       result[name] = value;
-    } else result[name] = text(value, name, 5000);
+    } else result[name] = text(value, `${label} ${name}`, 5000);
   }
   return result;
 }
@@ -145,7 +152,7 @@ export async function synchronizeSheet(db: DatabaseHandle, sheets: SheetsClient,
       const id = text(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
-      settings.set(id, settingsOf(row));
+      settings.set(id, settingsOf(row, i + 1));
     }
     const result = await db.transaction(async client => {
       const known = new Set((await client.query('SELECT id FROM parts')).rows.map(p => p.id));
