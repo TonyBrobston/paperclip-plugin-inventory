@@ -294,7 +294,7 @@ var TOOL_DECLARATIONS = [
     description: "Preview and submit atomic physical counts or receipts under Inventory policy. Human approval, metadata, settings and review operations require authenticated host authority; actor fields in parameters grant no permission.",
     phase: 4,
     parametersSchema: { type: "object", properties: {
-      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
+      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "refresh_refund_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
       lines: { type: "array", items: { type: "object", properties: { partId: { type: "string" }, counted: { type: "number" }, expected: { type: "number" }, ledgerRevision: { type: "string" }, quantity: { type: "number" } }, required: ["partId"] } },
       reason: { type: "string" },
       submissionKey: { type: "string" },
