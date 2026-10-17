@@ -104,6 +104,50 @@ integration("BigCommerce lifecycle", () => {
     await apply(snapshot);expect(await stock()).toMatchObject({onHand:18});
     expect(await apply(snapshot)).toEqual({duplicate:true});
   });
+  it.each([{cancelled:false,refreshed:false},{cancelled:true,refreshed:false},{cancelled:false,refreshed:true},{cancelled:true,refreshed:true}])("does not credit approved refunds again before checkpoint retry %j", async({cancelled,refreshed})=>{
+    const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(rows[0].revision),reason:'Require review',settings:{...rows[0].settings,approvalMode:'all'}});
+    await apply({shipped:2,observedAt:'2026-01-02T00:00:00Z'});
+    const first=await apply({shipped:2,refunded:1,observedAt:'2026-01-03T00:00:00Z'}) as any;
+    let approvedId=first.countId;
+    if(refreshed){
+      await executeNative(target.db,human,'reject_count',{countId:first.countId,reason:'Recheck return'});
+      const fresh=await executeNative(target.db,human,'refresh_refund_count',{countId:first.countId,reason:'Fresh return inspection'});
+      approvedId=fresh.countId;
+    }
+    await executeNative(target.db,{...human,id:'second-reviewer'},'approve_count',{countId:approvedId,reason:'First return verified'});
+    expect(await stock()).toMatchObject({onHand:18});
+    expect(await apply({shipped:2,observedAt:'2026-01-02T12:00:00Z'})).toEqual({stale:true});
+    const latest={shipped:2,refunded:cancelled?1:2,cancelled,observedAt:'2026-01-04T00:00:00Z'};
+    const second=await apply(latest) as any;
+    expect(second).toMatchObject({pendingApproval:true});
+    const delta=await target.db.query<any>('SELECT counted-expected AS delta FROM physical_count_lines WHERE count_id=$1',[second.countId]);
+    expect(Number(delta[0].delta)).toBe(2);
+    expect(await apply(latest)).toMatchObject({countId:second.countId,duplicate:true});
+    await executeNative(target.db,human,'approve_count',{countId:second.countId,reason:'Second return verified'});
+    await apply(latest);
+    expect(await apply(latest)).toEqual({duplicate:true});
+    expect(await stock()).toMatchObject({onHand:20});
+  });
+  it("refreshes an overlapping pending refund for only the remaining units", async()=>{
+    const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(rows[0].revision),reason:'Require review',settings:{...rows[0].settings,approvalMode:'all'}});
+    await apply({shipped:2,observedAt:'2026-01-02T00:00:00Z'});
+    const first=await apply({shipped:2,refunded:1,observedAt:'2026-01-03T00:00:00Z'}) as any;
+    const latest={shipped:2,refunded:2,observedAt:'2026-01-04T00:00:00Z'};
+    const second=await apply(latest) as any;
+    await executeNative(target.db,human,'approve_count',{countId:first.countId,reason:'First checked'});
+    await expect(executeNative(target.db,human,'approve_count',{countId:second.countId,reason:'Second checked'})).rejects.toThrow(/Stale/);
+    await executeNative(target.db,human,'reject_count',{countId:second.countId,reason:'Earlier return already credited'});
+    const fresh=await executeNative(target.db,human,'refresh_refund_count',{countId:second.countId,reason:'Recompute remaining return'});
+    expect(await apply(latest)).toMatchObject({countId:fresh.countId,pendingApproval:true});
+    await executeNative(target.db,{...human,id:'second-reviewer'},'approve_count',{countId:fresh.countId,reason:'Remaining parts verified'});
+    await apply(latest);
+    expect(await stock()).toMatchObject({onHand:20});
+    expect(await apply(latest)).toEqual({duplicate:true});
+  });
   it("refreshes a rejected stale refund with audited human authorization and credits once", async()=>{
     const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
     const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');

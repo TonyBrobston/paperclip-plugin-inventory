@@ -43522,6 +43522,18 @@ async function submitCount(db, client, actor, input2, allowNegative = false, for
   if (!forceApproval && !needsApproval(current.settings, lines)) return applyCount(db, client, count, { ...actor }, "Applied automatically within configured discrepancy thresholds");
   return { countId: count.id, status: "pending", duplicate: false };
 }
+async function appliedRefundUnits(client, orderId, lineId) {
+  const prefix = JSON.stringify(["bc-refund", orderId, lineId]).slice(0, -1) + ",";
+  const applied = await client.query(`WITH RECURSIVE refunds(root_key,id,status) AS (
+  SELECT submission_key,id,status FROM physical_counts
+  WHERE left(submission_key,length($1))=$1 AND right(submission_key,1)=']'
+  UNION
+  SELECT r.root_key,c.id,c.status FROM refunds r
+  JOIN operational_audit a ON a.operation='refresh_refund_count' AND a.target=r.id::text
+  JOIN physical_counts c ON c.submission_key=a.after_value->>'submissionKey'
+ ) SELECT root_key FROM refunds WHERE status='applied'`, [prefix]);
+  return Math.max(0, ...applied.rows.map((row) => Number(JSON.parse(row.root_key)[3])));
+}
 async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, reason, forceApproval = false) {
   await settings(client, true);
   const previous = await client.query("SELECT * FROM physical_counts WHERE submission_key=$1", [submissionKey]);
@@ -43529,9 +43541,10 @@ async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, r
     const old = previous.rows[0];
     const actual = old.payload.lines.map((l) => [l.partId, Number((l.counted - l.expected).toFixed(4))]).sort();
     const requested = deltas.map((l) => [l.partId, l.quantity]).sort();
-    if (old.reason !== reason || json2(actual) !== json2(requested)) throw new InputError("Adjustment batch key was already used with different quantities.");
+    if (old.reason !== reason) throw new InputError("Adjustment batch key was already used with a different reason.");
     const successor = await client.query("SELECT after_value->>'submissionKey' AS key FROM operational_audit WHERE operation='refresh_refund_count' AND target=$1 ORDER BY id DESC LIMIT 1", [old.id]);
     if (old.status === "rejected" && successor.rows[0]) return submitAdjustmentBatch(db, client, actor, deltas, successor.rows[0].key, reason, true);
+    if (json2(actual) !== json2(requested)) throw new InputError("Adjustment batch key was already used with different quantities.");
     return { countId: old.id, status: old.status, duplicate: true };
   }
   await lockParts(client, deltas.map((l) => l.partId));
@@ -43666,7 +43679,18 @@ async function executeNative(db, actor, operation, input2) {
       if (count.status !== "rejected") throw new InputError("Reject the stale refund before refreshing it.");
       const prior = await client.query("SELECT after_value FROM operational_audit WHERE operation='refresh_refund_count' AND target=$1", [id]);
       if (prior.rows[0]) return { ...prior.rows[0].after_value, duplicate: true };
-      const deltas = count.payload.lines.map((l) => ({ partId: l.partId, quantity: Number((l.counted - l.expected).toFixed(4)) }));
+      const key = JSON.parse(count.submission_key.slice(0, count.submission_key.lastIndexOf("]") + 1));
+      const remaining = Number(key[3]) - await appliedRefundUnits(client, key[1], key[2]);
+      if (remaining <= 0) throw new InputError("This refund has already been credited.");
+      const line = await client.query("SELECT expansion FROM bigcommerce_lines WHERE order_id=$1 AND line_id=$2", [key[1], key[2]]);
+      if (!line.rows[0]) throw new InputError("The refund order line was not found.");
+      const parts = await client.query("SELECT id,vendor,vendor_part_number FROM parts");
+      const ids = new Map(parts.rows.map((p) => [`${p.vendor}:${p.vendor_part_number}`.toLowerCase(), p.id]));
+      const deltas = line.rows[0].expansion.map((p) => {
+        const partId = ids.get(p.part.toLowerCase());
+        if (!partId) throw new InputError("Pinned BOM part no longer exists.");
+        return { partId, quantity: Number((remaining * p.quantity).toFixed(4)) };
+      });
       const submissionKey = `${count.submission_key}:after:${id}`;
       const next = await submitAdjustmentBatch(db, client, actor, deltas, submissionKey, count.reason, true);
       await audit(client, actor, operation, id, { countId: id, status: count.status }, { ...next, submissionKey }, reason);
@@ -44508,7 +44532,12 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
         p.id
       ])
     );
-    const credit = reversed - Number(prior?.reversed ?? 0);
+    const credited = Math.max(
+      Number(prior?.reversed ?? 0),
+      await appliedRefundUnits(client, input2.orderId, input2.lineId)
+    );
+    if (reversed < credited) return { stale: true };
+    const credit = reversed - credited;
     if (credit > 0) {
       const deltas = expansion.map((part) => {
         const partId = ids.get(part.part.toLowerCase());

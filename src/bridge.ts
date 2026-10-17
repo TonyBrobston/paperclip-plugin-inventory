@@ -8,7 +8,7 @@ import type { DatabaseHandle } from "./db.js";
 import { InputError } from "./errors.js";
 import { selectLines, type OptionSelection } from "./bom.js";
 import { readActiveBom } from "./sales.js";
-import { submitAdjustmentBatch } from "./native-service.js";
+import { appliedRefundUnits, submitAdjustmentBatch } from "./native-service.js";
 import { appendEntry } from "./ledger.js";
 import { parsePartRef } from "./parts.js";
 import { openStore } from "./storage.js";
@@ -181,7 +181,14 @@ export async function applyOrderLine(
         p.id,
       ]),
     );
-    const credit = reversed - Number(prior?.reversed ?? 0);
+    // Approval commits stock before this checkpoint is retried. Read durable
+    // applied counts (including audited successors), rather than crediting that
+    // stock again when a newer cumulative observation arrives first.
+    const credited = Math.max(Number(prior?.reversed ?? 0),
+      await appliedRefundUnits(client, input.orderId, input.lineId));
+    // An older, uncheckpointed snapshot cannot roll approved progress back.
+    if (reversed < credited) return { stale: true };
+    const credit = reversed - credited;
     if (credit > 0) {
       const deltas=expansion.map(part=>{
         const partId=ids.get(part.part.toLowerCase());
