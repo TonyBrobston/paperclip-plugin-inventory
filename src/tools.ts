@@ -272,22 +272,29 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     },
   },
   {
-    name: "sync_sheet",
-    displayName: "Sync the Google Sheet",
-    description:
-      "Push system-owned columns to the inventory sheet, read the human-owned ones back, turn Adjustments-tab rows into ledger adjustments and mark them processed, and refresh the Needs Review view.",
+    name: "inventory_page",
+    displayName: "Read Inventory pages",
+    description: "Read inventory, counts, receiving, review, settings, history or dashboard data in the host-authorized company.",
     phase: 4,
-    parametersSchema: {
-      type: "object",
-      properties: {
-        dryRun: {
-          type: "boolean",
-          description:
-            "Report what would change without writing to the sheet or the ledger.",
-          default: false,
-        },
-      },
-    },
+    parametersSchema: { type: "object", properties: {
+      page: { type: "string", enum: ["inventory","counts","receiving","review","settings","history","dashboard"] },
+      search: {type:"string"}, vendor: {type:"string"}, active: {type:"string",enum:["all","true","false"]},
+      lowStock: {type:"boolean"}, orderId: {type:"string"}, partId: {type:"string"},
+    }, required:["page"] },
+  },
+  {
+    name: "inventory_action",
+    displayName: "Manage Inventory",
+    description: "Preview and submit atomic physical counts or receipts under Inventory policy. Human approval, metadata, settings and review operations require authenticated host authority; actor fields in parameters grant no permission.",
+    phase: 4,
+    parametersSchema: {type:"object",properties:{
+      operation:{type:"string",enum:["preview_count","submit_count","adjust","approve_count","reject_count","preview_receipt","confirm_receipt","short_close","edit_part","save_settings","import_legacy_settings","resolve_review"]},
+      lines:{type:"array",items:{type:"object",properties:{partId:{type:"string"},counted:{type:"number"},expected:{type:"number"},ledgerRevision:{type:"string"},quantity:{type:"number"}},required:["partId"]}},
+      reason:{type:"string"},submissionKey:{type:"string"},countId:{type:"string"},orderId:{type:"string"},previewId:{type:"string"},shipmentReference:{type:"string"},
+      partId:{type:"string"},quantityDelta:{type:"number"},reference:{type:"string"},revision:{type:"string"},settings:{type:"object"},parts:{type:"array",items:{type:"object"}},
+      reorderPoint:{type:"number"},targetQuantity:{type:"number"},location:{type:"string"},notes:{type:"string"},active:{type:"boolean"},
+      ledgerRevision:{type:"string"},outstanding:{type:"number"},reviewItemId:{type:"string"},resolution:{type:"string",enum:["accept","accept_with_corrections","reject"]},note:{type:"string"},corrections:{type:"object"},independentExtraction:{type:"object"},agentModel:{type:"string"},
+    },required:["operation"]},
   },
   {
     name: "sync_boms",

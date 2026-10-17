@@ -8,10 +8,17 @@ import { parsePartRef } from './parts.js';
 import { parseEnabledVendors } from './config.js';
 import { openStore } from './storage.js';
 import { object, text, extraction, vendorKey, disagreements, reconcile, type Extraction } from './extraction.js';
+import type { NativeActor } from './native-service.js';
+import { readNative } from './native-service.js';
 import { parsers, selectParser } from './parsers/index.js';
 
-function provenance(run: ToolRunContext, source: string) {
-  return { source, agentId: run.agentId, runId: run.runId, companyId: run.companyId, projectId: run.projectId };
+interface SourceIdentity { companyId: string; agentId?: string; userId?: string; runId?: string; projectId?: string; }
+function provenance(run: SourceIdentity, source: string) {
+  return { source, actorType: run.userId ? 'user' : 'agent', userId: run.userId, agentId: run.agentId, runId: run.runId, companyId: run.companyId, projectId: run.projectId };
+}
+async function enabledVendors(db: DatabaseHandle) {
+  const settings = await readNative(db, 'settings', {});
+  return parseEnabledVendors((settings as { settings: { enabledVendors: unknown } }).settings.enabledVendors);
 }
 interface Verification {
   extraction?: Extraction;
@@ -50,7 +57,7 @@ async function previousOrder(client: PoolClient, vendor: string, order: Extracti
   // Only duplicate detection tolerates absence; model/parser comparisons remain strict.
   return { orderId: old.id as string, conflicts: disagreements(stored, order).filter(reason => reason !== 'Order dates differ' || !!(stored.orderDate && order.orderDate)) };
 }
-async function recordOrder(db: DatabaseHandle, client: PoolClient, vendor: string, order: Extraction, messageId: string, rawText: string, run: ToolRunContext, reviewItemId?: string) {
+async function recordOrder(db: DatabaseHandle, client: PoolClient, vendor: string, order: Extraction, messageId: string, rawText: string, run: SourceIdentity, reviewItemId?: string) {
   await lock(client, JSON.stringify(['order', vendor, order.orderNumber.toLowerCase()]));
   const previous = await previousOrder(client, vendor, order);
   if (previous?.conflicts.length) throw new InputError('This vendor order is already recorded with different contents. Existing stock was not changed.');
@@ -65,7 +72,7 @@ async function recordOrder(db: DatabaseHandle, client: PoolClient, vendor: strin
       part: parsePartRef(`${vendor}:${line.vendorPartNumber}`), entryType: 'purchase', quantity: line.quantity,
       unitCost: line.unitPrice, reference: order.orderNumber, idempotencyScope: ['purchase', orderId, String(number)],
       provenance: { ...provenance(run, reviewItemId ? 'resolve_review_item' : 'submit_order_email'), messageId, rawText, orderId, line: number, ...(reviewItemId ? { reviewItemId } : {}) },
-      createdBy: run.agentId, createMissingPart: true, description: line.description,
+      createdBy: run.userId ?? run.agentId!, createMissingPart: true, description: line.description,
     }, client);
     await client.query(`INSERT INTO order_lines (order_id,line_number,part_id,quantity,unit_price,line_total)
       VALUES ($1,$2,$3,$4,$5,round($4::numeric*$5::numeric,4))`, [orderId, number, result.part.partId, line.quantity, line.unitPrice]);
@@ -78,7 +85,8 @@ export async function submitOrderEmail(ctx: PluginContext, raw: unknown, run: To
   text(input.rawText, 'Raw email', 1_000_000);
   const rawText = input.rawText as string;
   const vendorHint = input.vendor === undefined ? undefined : vendorKey(input.vendor);
-  const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+  const db = await openStore(ctx, run.companyId);
+  const enabled = await enabledVendors(db);
   const parser = selectParser(rawText, vendorHint, enabled);
   const vendor = parser?.vendor ?? vendorHint ?? 'unknown';
   let agent: Extraction | undefined;
@@ -102,7 +110,6 @@ export async function submitOrderEmail(ctx: PluginContext, raw: unknown, run: To
     // A known but disabled parser must not be bypassed using agent extraction.
     if (vendorHint && !enabled.includes(vendorHint as typeof enabled[number]) && ['mcmaster', 'sendcutsend'].includes(vendorHint)) reasons.push('Vendor parser is disabled in company configuration');
   }
-  const db = await openStore(ctx, run.companyId);
   const result = await db.transaction(async client => {
     await lock(client, JSON.stringify(['message', messageId]));
     const existing = await disposition(client, messageId);
@@ -141,13 +148,17 @@ export async function listReviewQueue(ctx: PluginContext, raw: unknown, run: Too
   return { content: `${items.length} email(s) awaiting review.`, data: { items, count: items.length } };
 }
 export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: ToolRunContext): Promise<ToolResult> {
-  const input = object(raw);
+  const db = await openStore(ctx, run.companyId);
+  const data = await resolveReviewDomain(ctx, db, object(raw), { type: 'agent', id: run.agentId, companyId: run.companyId }, run);
+  return { content: `Review item ${data.status}.`, data };
+}
+export async function resolveReviewDomain(ctx: PluginContext, db: DatabaseHandle, input: Record<string, unknown>, actor: NativeActor, source?: SourceIdentity) {
+  const run: SourceIdentity = source ?? { companyId: actor.companyId, ...(actor.type === 'user' ? { userId: actor.id } : { agentId: actor.id }) };
   const id = text(input.reviewItemId, 'Review item id');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new InputError('Review item id must be a UUID.');
   const resolution = text(input.resolution, 'Resolution');
   if (!['accept', 'accept_with_corrections', 'reject'].includes(resolution)) throw new InputError('Unknown review resolution.');
   const note = text(input.note, 'Resolution note');
-  const db = await openStore(ctx, run.companyId);
   const result = await db.transaction(async client => {
     const rows = await client.query('SELECT * FROM review_queue WHERE id=$1 FOR UPDATE', [id]);
     const item = rows.rows[0];
@@ -165,7 +176,7 @@ export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: T
         const saved = extraction(item.parser_extraction);
         reasons.push(...reconcile(saved), ...disagreements(selected, saved));
       }
-      const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+      const enabled = await enabledVendors(db);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
       // A matching parser may have refused this layout. Without a saved
       // extraction it provides no verification, so require a second model.
@@ -178,9 +189,9 @@ export async function resolveReviewItem(ctx: PluginContext, raw: unknown, run: T
     }
     const status = resolution === 'reject' ? 'rejected' : resolution === 'accept' ? 'accepted' : 'accepted_with_corrections';
     await client.query(`UPDATE review_queue SET status=$2,resolution_note=$3,resolved_at=now(),resolved_by=$4,
-      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, 'resolve_review_item'), independentExtraction: input.independentExtraction, agentModel: input.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
+      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, actor.id, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, 'resolve_review_item'), independentExtraction: input.independentExtraction, agentModel: input.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
     // Retain review_id for audit, so disposition derives the accepted order through it.
     return { reviewItemId: id, status, orderId, duplicate: false };
   });
-  return { content: `Review item ${result.status}.`, data: result };
+  return result;
 }

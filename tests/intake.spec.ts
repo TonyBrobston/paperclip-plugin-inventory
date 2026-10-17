@@ -99,6 +99,19 @@ integration('verified email intake through the host harness', () => {
     expect(row.resolved_by).toBe('author'); expect(row.resolution_extraction).toEqual(correct());
     expect(row.agent_extraction).toEqual(wrong);
   });
+  it('records the authenticated native human reviewer without accepting spoofed identity', async () => {
+    const wrong = correct(); wrong.lines[0]!.quantity=40;
+    const queued = await submit({agentExtraction:wrong});
+    await harness.performAction('inventory_action', {
+      operation:'resolve_review',reviewItemId:queued.data?.reviewItemId,
+      resolution:'accept_with_corrections',corrections:correct(),note:'Verified against source',
+      userId:'forged',agentId:'forged',companyId:'forged',
+    }, {companyId:t.schema,actor:{type:'user',userId:'human-reviewer',companyId:t.schema}});
+    const row = (await exec(t,'SELECT resolved_by,resolution_provenance FROM review_queue'))[0]!;
+    expect(row.resolved_by).toBe('human-reviewer');
+    expect(row.resolution_provenance).toMatchObject({actorType:'user',userId:'human-reviewer',companyId:t.schema});
+    expect(row.resolution_provenance).not.toHaveProperty('agentId');
+  });
   it('reports the recorded order on retries after corrected review, including aliases', async () => {
     const recorded = await submit();
     const wrong = correct(); wrong.lines[0]!.quantity = 40;

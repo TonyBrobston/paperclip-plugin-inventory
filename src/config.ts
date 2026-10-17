@@ -23,7 +23,6 @@ export interface InventorySettings {
   /** Unresolved. The value is fetched per call and never stored. */
   databaseUrlRef: EnvSecretRefBinding;
   databaseSchema: string;
-  enabledVendors: SupportedVendor[];
 }
 
 const schemaNameRe = new RegExp(SCHEMA_NAME_PATTERN);
@@ -106,7 +105,6 @@ export function parseSettings(config: Record<string, unknown>): InventorySetting
   return {
     databaseUrlRef,
     databaseSchema: parseDatabaseSchema(config[CONFIG_KEYS.databaseSchema]),
-    enabledVendors: parseEnabledVendors(config[CONFIG_KEYS.enabledVendors]),
   };
 }
 

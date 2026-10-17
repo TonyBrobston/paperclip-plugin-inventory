@@ -5,7 +5,6 @@ import {
   PLUGIN_ID,
   PLUGIN_VERSION,
   SCHEMA_NAME_PATTERN,
-  SUPPORTED_VENDORS,
 } from "./constants.js";
 import { TOOL_DECLARATIONS } from "./tools.js";
 
@@ -27,10 +26,16 @@ const manifest: PaperclipPluginManifestV1 = {
     "Parts inventory for a small manufacturing business. Records purchases from vendor order emails with a double-extraction check, derives on-hand stock from an append-only ledger, and consumes parts through a bill of materials when products sell.",
   author: "Tony Brobston",
   categories: ["automation"],
-  capabilities: ["secrets.read-ref", "agent.tools.register"],
+  capabilities: ["secrets.read-ref", "agent.tools.register", "ui.page.register", "ui.sidebar.register", "ui.dashboardWidget.register", "ui.action.register"],
   entrypoints: {
     worker: "./dist/worker.js",
+    ui: "./dist/ui",
   },
+  ui: { slots: [
+    {id:"inventory",type:"page",displayName:"Inventory",exportName:"InventoryPage",routePath:"inventory"},
+    {id:"inventory-nav",type:"sidebar",displayName:"Inventory",exportName:"InventorySidebar"},
+    {id:"inventory-alerts",type:"dashboardWidget",displayName:"Inventory",exportName:"InventoryDashboard"},
+  ]},
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -57,16 +62,6 @@ const manifest: PaperclipPluginManifestV1 = {
           // itself, so over-constraining it here is what makes a legitimate
           // pinned-version binding impossible to save.
         },
-        required: ["type", "secretId"],
-      },
-      spreadsheetId: {
-        type: "string", title: "Spreadsheet ID (optional until Sheet sync)",
-        description: "Copy from private deployment settings. Never put a real spreadsheet ID in public code.",
-        pattern: "^[a-zA-Z0-9_-]{10,200}$",
-      },
-      googleServiceAccount: {
-        type: "object", format: "secret-ref", title: "Google service-account JSON key",
-        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
         required: ["type", "secretId"],
       },
       [CONFIG_KEYS.configRepo]: {
@@ -119,17 +114,7 @@ const manifest: PaperclipPluginManifestV1 = {
         // worker cannot disagree about what is acceptable.
         pattern: SCHEMA_NAME_PATTERN,
       },
-      [CONFIG_KEYS.enabledVendors]: {
-        type: "array",
-        title: "Enabled vendors (optional)",
-        description:
-          "Which vendor order-email parsers to run. Leave blank to enable all of them. A vendor with no parser cannot be enabled here; its orders need a second independent extraction instead.",
-        items: {
-          type: "string",
-          enum: [...SUPPORTED_VENDORS],
-        },
-        uniqueItems: true,
-      },
+
     },
     required: [CONFIG_KEYS.databaseUrl],
   },

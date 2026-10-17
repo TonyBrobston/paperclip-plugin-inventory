@@ -55,7 +55,8 @@ A Paperclip plugin that tracks parts inventory for a small manufacturing busines
 * `list_review_queue`, `resolve_review_item`
 * `get_stock(partId?)`, `get_sellable(productSku?)`
 * `sync_boms()`
-* Physical count preview/submission, approval/rejection/reconciliation and settings operations, shared with the native UI.
+* `inventory_page({ page, ...filters })`: read native inventory, counts, receiving, review, settings and dashboard data.
+* `inventory_action({ operation, ...parameters })`: physical count preview/submission, approval/rejection/reconciliation and settings operations, shared with the native UI.
 * `reconcile_bigcommerce()`: fallback if plugin events aren't available.
 
 ## Verification (double extraction)

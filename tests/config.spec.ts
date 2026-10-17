@@ -93,12 +93,11 @@ describe("parseSettings", () => {
       parseSettings({
         [CONFIG_KEYS.databaseUrl]: SECRET_REF,
         [CONFIG_KEYS.databaseSchema]: "inventory",
-        [CONFIG_KEYS.enabledVendors]: ["mcmaster", "sendcutsend"],
+        enabledVendors: ["mcmaster", "sendcutsend"],
       }),
     ).toEqual({
       databaseUrlRef: SECRET_REF,
       databaseSchema: "inventory",
-      enabledVendors: ["mcmaster", "sendcutsend"],
     });
   });
 

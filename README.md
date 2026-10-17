@@ -1,17 +1,8 @@
 # paperclip-plugin-inventory
 
-Small manufacturers lose track of parts. Purchases arrive as vendor order
-emails nobody transcribes, sales consume parts through a bill of materials
-nobody expands, and the spreadsheet that is supposed to hold it all together
-drifts within a week. The result is a storefront selling a kit whose screws ran
-out a month ago.
+Inventory lives inside Paperclip, backed by an append-only PostgreSQL ledger. Agents record verified order emails and BOM-driven sales; humans search stock, receive shipments, count parts and decide reviews in the native UI.
 
-This plugin makes an append-only PostgreSQL ledger the source of truth for
-parts, and gives agents the tools to keep it current: order emails in, sales
-out, a Google Sheet as the human-facing view, and a review queue for anything
-the plugin could not verify.
-
-**Status:** ledger, verified email intake, review resolution, `sync_sheet`, `sync_boms` and `record_sale` are implemented. The BigCommerce bridge implements `get_sellable` and agent-run `reconcile_bigcommerce`; see [bridge setup and recovery](docs/bigcommerce.md). See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) and [BOMs: the file format, versioning, and what reaches the public docs](docs/boms.md) before configuring either sync.
+Native Inventory pages share domain services with `inventory_page` and `inventory_action`. Adjustments from every entry point require a persisted count submission and the configured approval policy. See [native operations and recovery](docs/native-operations.md), [BOM configuration](docs/boms.md) and [BigCommerce bridge](docs/bigcommerce.md).
 
 ## The ledger
 
@@ -27,7 +18,7 @@ which is why the table's rules are in the schema rather than in TypeScript:
   is not a movement at all, so it lives in `reservations`. `part_stock` is the
   one view that defines all three.
 - **Idempotent.** An entry may carry a key, unique in the database, so
-  reprocessing an order email or re-running a sheet sync cannot double-count.
+  reprocessing an order email or retrying a count submission cannot double-count.
   Reusing a key with a *different* quantity is refused rather than merged.
   The key is built from the *resolved* part — never from the spelling the
   caller used — because `vendor-a:PART-001`, `vendor-a:part-001` and the
@@ -84,14 +75,12 @@ repository.
 |---|---|---|
 | Database connection | yes | A Paperclip secret holding a PostgreSQL connection string. The plugin creates and owns one schema inside that database. |
 | Schema name | no | Defaults to `inventory`. |
-| Enabled vendors | no | Which order-email parsers to run. Defaults to all of them. |
+| Operational settings | native Settings | Enabled vendors, discrepancy thresholds and authenticated human approval policy, persisted in PostgreSQL. |
 | Private config repository, branch and GitHub token | for `sync_boms` | Where `bom/` lives. Only that directory is ever read. |
 | BigCommerce store hash and API token | for `sync_boms` | Used to check a BOM's catalog key and option values exist before the BOM is accepted. |
 
 Credentials are secret references resolved at call time, never stored in
-plugin config and never written to logs. Business settings — BOM files, the
-spreadsheet id, which vendors a particular shop buys from — belong in a
-separate private configuration repository, not here.
+plugin config and never written to logs. BOM files belong in a separate private configuration repository. Operational settings and part metadata live in PostgreSQL. No Google credential is required.
 
 ## Development
 

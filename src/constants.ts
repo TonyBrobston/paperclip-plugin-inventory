@@ -37,13 +37,6 @@ export const CONFIG_KEYS = {
    */
   databaseSchema: "databaseSchema",
   /**
-   * Vendors whose parsers are enabled for this company.
-   *
-   * Which vendors a business buys from is a deployment setting, so it comes
-   * from config. The parser modules themselves ship with the plugin.
-   */
-  enabledVendors: "enabledVendors",
-  /**
    * The private config repository holding `bom/`, as `owner/name`.
    *
    * Which repository is a deployment setting, so it comes from config rather

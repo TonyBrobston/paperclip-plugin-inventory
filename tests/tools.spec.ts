@@ -22,7 +22,8 @@ const SPEC_TOOLS = [
   "resolve_review_item",
   "get_stock",
   "get_sellable",
-  "sync_sheet",
+  "inventory_page",
+  "inventory_action",
   "sync_boms",
   "reconcile_bigcommerce",
 ];

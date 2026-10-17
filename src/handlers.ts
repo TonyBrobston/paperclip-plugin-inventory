@@ -23,6 +23,7 @@ import {
 } from "./ledger.js";
 import { parsePartRef } from "./parts.js";
 import { parseQuantity } from "./quantity.js";
+import { nativeAction, toolActor } from "./native.js";
 import { openStore } from "./storage.js";
 
 /** Longest free text we will store from a tool argument. */
@@ -198,41 +199,13 @@ export async function recordAdjustment(
   const reason = requiredText(input.reason, "A reason");
   const reference = optionalText(input.reference, "The reference");
 
-  const db = await openStore(ctx, runCtx.companyId);
-
-  const result = await appendEntry(db, {
-    part,
-    entryType: "adjustment",
-    quantity: quantityDelta,
-    // An adjustment with no external document still needs something
-    // traceable in the column, and the reason is what there is.
-    reference: reference ?? `adjustment: ${reason}`.slice(0, MAX_TEXT),
-    idempotencyScope: reference ? ["adjustment"] : undefined,
-    note: reason,
-    createMissingPart: part.kind === "vendor",
-    provenance: provenanceOf("record_adjustment", runCtx, {
-      reason,
-      ...(reference ? { reference } : {}),
-    }),
-    createdBy: runCtx.agentId,
+  const result = await nativeAction(ctx, toolActor(runCtx), {
+    operation: 'adjust', partId: input.partId, quantityDelta, reason, reference,
   });
-
-  if (result.duplicate && result.entry.quantityDelta !== quantityDelta) {
-    throw new InputError(
-      `Reference "${reference}" was already used to adjust ${result.part.ref} by ${result.entry.quantityDelta}, not ${quantityDelta}. Nothing was changed.`,
-    );
-  }
-
-  const base = entryResult("record_adjustment", result, "adjustment");
-  if (!result.duplicate && result.stock.onHand < 0) {
-    // Allowed, and worth saying out loud: a negative count is almost always a
-    // missing receipt rather than a real shortage.
-    return {
-      ...base,
-      content: `${base.content} On hand is now negative, which an adjustment is allowed to do — check whether a receipt is missing.`,
-    };
-  }
-  return base;
+  return {
+    content: 'Adjustment submitted under the inventory approval policy.',
+    data: { tool: 'record_adjustment', ...(result as Record<string, unknown>) },
+  };
 }
 
 /** On hand, on order and committed — derived, never read from a stored total. */

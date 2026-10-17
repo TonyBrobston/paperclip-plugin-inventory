@@ -7,6 +7,7 @@ import {
 } from "../src/bridge.js";
 import { bigcommerceClient } from "../src/bigcommerce.js";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { executeNative } from "../src/native-service.js";
 import { appendEntry, readStock } from "../src/ledger.js";
 import { synchronizeBoms } from "../src/bom-sync.js";
 import { activeBomYaml, CATALOG, fakeConfigRepo, RUN } from "./support/boms.js";
@@ -61,6 +62,8 @@ integration("BigCommerce lifecycle", () => {
       createdBy: "test",
     });
     await sync();
+    const policy=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,{type:'user',id:'reviewer',companyId:RUN.companyId},'save_settings',{revision:String(policy[0].revision),reason:'Synthetic automatic refund policy',settings:{...policy[0].settings,approvalMode:'threshold',absoluteThreshold:1000,percentThreshold:1000}});
   });
   afterEach(async () => { vi.unstubAllGlobals(); await dropSchema(target); });
   it("reserves once and subtracts commitments from sellable", async () => {
@@ -89,6 +92,17 @@ integration("BigCommerce lifecycle", () => {
       observedAt: "2026-01-04T00:00:00Z",
     });
     expect(await stock()).toMatchObject({ onHand: 20, committed: 0 });
+  });
+  it("holds refunds under the default approval policy and retries after authenticated approval", async()=>{
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,{type:'user',id:'reviewer',companyId:RUN.companyId},'save_settings',{revision:String(rows[0].revision),reason:'Require human review',settings:{...rows[0].settings,approvalMode:'all'}});
+    await apply({shipped:2,observedAt:'2026-01-02T00:00:00Z'});
+    const snapshot={shipped:2,refunded:1,observedAt:'2026-01-03T00:00:00Z'};
+    const pending=await apply(snapshot);expect(pending).toMatchObject({pendingApproval:true,status:'pending'});
+    expect(await stock()).toMatchObject({onHand:16});
+    await executeNative(target.db,{type:'user',id:'reviewer',companyId:RUN.companyId},'approve_count',{countId:(pending as any).countId,reason:'Returned parts verified'});
+    await apply(snapshot);expect(await stock()).toMatchObject({onHand:18});
+    expect(await apply(snapshot)).toEqual({duplicate:true});
   });
   it("releases cancellations and ignores older placed snapshots", async () => {
     await apply({ cancelled: true, observedAt: "2026-01-02T00:00:00Z" });
@@ -247,19 +261,8 @@ integration("BigCommerce lifecycle", () => {
   });
   it("uses scaled arithmetic for fractional part quantities", async () => {
     await sync(0.1);
-    await appendEntry(target.db, {
-      part: {
-        kind: "vendor",
-        vendor: "vendor-a",
-        vendorPartNumber: "part-001",
-        ref: "vendor-a:part-001",
-      },
-      quantity: -19.7,
-      reference: "count",
-      entryType: "adjustment",
-      provenance: { source: "test" },
-      createdBy: "test",
-    });
+    const count=await executeNative(target.db,{type:'agent',id:RUN.agentId,companyId:RUN.companyId},'adjust',{partId:'vendor-a:part-001',quantityDelta:-19.7,reference:'count',reason:'Synthetic fractional count'});
+    await executeNative(target.db,{type:'user',id:'reviewer',companyId:RUN.companyId},'approve_count',{countId:count.countId,reason:'Verified'});
     expect(
       await target.db.transaction((c) => sellableInTransaction(c)),
     ).toMatchObject([{ quantity: 3 }]);

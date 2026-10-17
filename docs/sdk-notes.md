@@ -100,10 +100,9 @@ Three traps worth knowing before Phase 2 writes a settings form:
    nothing else. Anything that must block a save has to be expressible in the
    schema itself.
 
-Consequence for this repo: the connection string, the service-account key, and
-the BigCommerce token are all secret refs. The Sheet ID and the enabled-vendor
-list are ordinary config and live in the private config repo. Neither kind
-belongs in this repository.
+The database connection and BigCommerce credentials are secret refs. Enabled
+vendors and reconciliation policies live in PostgreSQL through native Settings.
+Deployment and BOM configuration belongs in the private config repository.
 
 ## (c) Whether a plugin can use its own Postgres schema
 
@@ -280,4 +279,9 @@ Inventory must work inside Paperclip without Google authentication. Native UI im
 - Executed existing host tests without host source changes: server plugin-routes-authz.test.ts + plugin-ui-static.test.ts: 42/42 PASS; UI bridge.test.ts + slots.test.ts + slots-loading.test.tsx: 18/18 PASS. Commands: from server, ../node_modules/.bin/vitest run --config vitest.config.ts src/__tests__/plugin-routes-authz.test.ts src/__tests__/plugin-ui-static.test.ts; from ui, equivalent command naming src/plugins/bridge.test.ts, src/plugins/slots.test.ts and src/plugins/slots-loading.test.tsx. Tests exercise route handlers with synthetic authenticated principals, not a live board session.
 - Remaining release checks: installed Inventory ready status; real UI asset loading and page/navigation/widget placement; real data/action round-trip with non-null human identity; viewer and cross-company denial; count/receiving workflows in the running native UI after Reed approval. Agent discovery returning 403 is an access boundary, not missing host capability. Do not impersonate board identities or alter Paperclip core.
 
-Active Sheets requirements elsewhere in this historical discovery document are superseded by SPEC.md. Remove stale active guidance as the native implementation lands; retain historical SQL migrations and ledger history.
+Native data reads use only the company scope injected by the host; native writes
+use `context.actor`. The plugin binds each PostgreSQL schema to one company and
+rejects a different company even if its database configuration is copied.
+Host membership and viewer checks remain host responsibilities; the plugin
+requires human IDs for approvals/settings and enforces its own approval policy.
+Read handlers cannot approve, reconcile, or update operational settings.

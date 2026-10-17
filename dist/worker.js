@@ -36,13 +36,6 @@ var init_constants = __esm({
        */
       databaseSchema: "databaseSchema",
       /**
-       * Vendors whose parsers are enabled for this company.
-       *
-       * Which vendors a business buys from is a deployment setting, so it comes
-       * from config. The parser modules themselves ship with the plugin.
-       */
-      enabledVendors: "enabledVendors",
-      /**
        * The private config repository holding `bom/`, as `owner/name`.
        *
        * Which repository is a deployment setting, so it comes from config rather
@@ -140,13 +133,12 @@ function parseSettings(config2) {
   }
   return {
     databaseUrlRef,
-    databaseSchema: parseDatabaseSchema(config2[CONFIG_KEYS.databaseSchema]),
-    enabledVendors: parseEnabledVendors(config2[CONFIG_KEYS.enabledVendors])
+    databaseSchema: parseDatabaseSchema(config2[CONFIG_KEYS.databaseSchema])
   };
 }
 async function resolveConnection(ctx, companyId) {
-  const settings = parseSettings(await ctx.config.get(companyId));
-  const connectionString = await ctx.secrets.resolve(settings.databaseUrlRef, {
+  const settings2 = parseSettings(await ctx.config.get(companyId));
+  const connectionString = await ctx.secrets.resolve(settings2.databaseUrlRef, {
     companyId,
     configPath: CONFIG_KEYS.databaseUrl
   });
@@ -155,7 +147,7 @@ async function resolveConnection(ctx, companyId) {
       "The configured database connection secret resolved to an empty value."
     );
   }
-  return { connectionString, settings };
+  return { connectionString, settings: settings2 };
 }
 var ConfigError, schemaNameRe;
 var init_config = __esm({
@@ -260,6 +252,21 @@ var init_db = __esm({
     "use strict";
     init_constants();
     pools = /* @__PURE__ */ new Map();
+  }
+});
+
+// src/native-policy.ts
+async function authorizeAdjustment(client, lineId, partId, delta) {
+  if (!lineId) throw new InputError("Adjustments must be submitted through the inventory reconciliation policy.");
+  const result = await client.query(`SELECT 1 FROM physical_count_lines l JOIN physical_counts c ON c.id=l.count_id
+    WHERE l.id=$1 AND l.part_id=$2 AND l.counted-l.expected=$3 AND c.status='applying'
+    AND c.decided_by IS NOT NULL AND l.ledger_entry_id IS NULL`, [lineId, partId, delta]);
+  if (!result.rowCount) throw new InputError("This adjustment has no authorized count submission.");
+}
+var init_native_policy = __esm({
+  "src/native-policy.ts"() {
+    "use strict";
+    init_errors();
   }
 });
 
@@ -463,7 +470,8 @@ async function outstandingOnOrder(client, partId, reference) {
        FROM ledger_entries WHERE part_id = $1 AND reference = $2`,
     [partId, reference]
   );
-  return Math.max(toNumber(rows[0]?.outstanding), 0);
+  const closed = await client.query(`SELECT COALESCE(sum(c.quantity),0) AS quantity FROM order_short_closes c JOIN orders o ON o.id=c.order_id WHERE c.part_id=$1 AND o.vendor_order_number=$2`, [partId, reference]);
+  return Math.max(toNumber(rows[0]?.outstanding) - toNumber(closed.rows[0]?.quantity), 0);
 }
 async function currentOnHand(client, partId) {
   const { rows } = await client.query(
@@ -484,20 +492,20 @@ async function findByIdempotencyKey(client, key) {
   );
   return rows[0] ? toEntry(rows[0]) : void 0;
 }
-function bucketsFor(entryType, quantity2, outstanding) {
+function bucketsFor(entryType, quantity3, outstanding) {
   switch (entryType) {
     case "purchase":
-      return { quantityDelta: quantity2, onHandDelta: 0, onOrderDelta: quantity2 };
+      return { quantityDelta: quantity3, onHandDelta: 0, onOrderDelta: quantity3 };
     case "receipt":
       return {
-        quantityDelta: quantity2,
-        onHandDelta: quantity2,
-        onOrderDelta: -Math.min(quantity2, outstanding)
+        quantityDelta: quantity3,
+        onHandDelta: quantity3,
+        onOrderDelta: -Math.min(quantity3, outstanding)
       };
     case "sale":
-      return { quantityDelta: -quantity2, onHandDelta: -quantity2, onOrderDelta: 0 };
+      return { quantityDelta: -quantity3, onHandDelta: -quantity3, onOrderDelta: 0 };
     case "adjustment":
-      return { quantityDelta: quantity2, onHandDelta: quantity2, onOrderDelta: 0 };
+      return { quantityDelta: quantity3, onHandDelta: quantity3, onOrderDelta: 0 };
   }
 }
 async function appendEntry(db, input2, transactionClient) {
@@ -533,7 +541,12 @@ async function appendEntry(db, input2, transactionClient) {
         };
       }
     }
+    if (input2.entryType === "adjustment") await authorizeAdjustment(client, input2.countLineId, part.partId, input2.quantity);
     const outstanding = input2.entryType === "receipt" ? await outstandingOnOrder(client, part.partId, reference) : 0;
+    if (input2.entryType === "receipt" && input2.quantity > outstanding) {
+      const ordered2 = await client.query("SELECT 1 FROM ledger_entries WHERE part_id=$1 AND reference=$2 AND entry_type='purchase' LIMIT 1", [part.partId, reference]);
+      if (ordered2.rowCount && !input2.note?.trim()) throw new InputError("Receiving more than the outstanding order requires an overage reason.");
+    }
     const deltas = bucketsFor(input2.entryType, input2.quantity, outstanding);
     if (deltas.onHandDelta < 0 && input2.entryType !== "adjustment") {
       const onHand = await currentOnHand(client, part.partId);
@@ -546,8 +559,8 @@ async function appendEntry(db, input2, transactionClient) {
     const { rows } = await client.query(
       `INSERT INTO ledger_entries
            (part_id, entry_type, quantity_delta, on_hand_delta, on_order_delta,
-            unit_cost, reference, idempotency_key, note, provenance, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+            unit_cost, reference, idempotency_key, note, provenance, created_by, count_line_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
          RETURNING ${ENTRY_COLUMNS}`,
       [
         part.partId,
@@ -560,7 +573,8 @@ async function appendEntry(db, input2, transactionClient) {
         key ?? null,
         input2.note ?? null,
         JSON.stringify(input2.provenance),
-        input2.createdBy
+        input2.createdBy,
+        input2.countLineId ?? null
       ]
     );
     return {
@@ -620,6 +634,7 @@ var UNIQUE_VIOLATION, ENTRY_COLUMNS;
 var init_ledger = __esm({
   "src/ledger.ts"() {
     "use strict";
+    init_native_policy();
     init_errors();
     init_parts();
     init_quantity();
@@ -756,10 +771,11 @@ async function ensureMigrated(db) {
   }
 }
 async function openStore(ctx, companyId) {
-  const { connectionString, settings } = await resolveConnection(ctx, companyId);
+  if (typeof companyId !== "string" || !companyId.trim()) throw new InputError("Host-authorized company is required.");
+  const { connectionString, settings: settings2 } = await resolveConnection(ctx, companyId);
   let db;
   try {
-    db = await getDatabase(companyId, connectionString, settings.databaseSchema);
+    db = await getDatabase(companyId, connectionString, settings2.databaseSchema);
   } catch (error62) {
     ctx.logger.error("Could not open the inventory database", {
       companyId,
@@ -775,13 +791,18 @@ async function openStore(ctx, companyId) {
   } catch (error62) {
     ctx.logger.error("Inventory migrations failed", {
       companyId,
-      schema: settings.databaseSchema,
+      schema: settings2.databaseSchema,
       reason: error62?.message
     });
     throw new StorageError(
-      `The inventory database could not be brought up to date. The plugin log has the failing migration; check that the connection in ${SETTINGS_PATH} can create tables in the "${settings.databaseSchema}" schema.`
+      `The inventory database could not be brought up to date. The plugin log has the failing migration; check that the connection in ${SETTINGS_PATH} can create tables in the "${settings2.databaseSchema}" schema.`
     );
   }
+  await db.transaction(async (client) => {
+    await client.query("INSERT INTO company_scope(singleton,company_id) VALUES(true,$1) ON CONFLICT DO NOTHING", [companyId]);
+    const result = await client.query("SELECT company_id FROM company_scope WHERE singleton=true");
+    if (result.rows[0]?.company_id !== companyId) throw new InputError("This inventory schema belongs to another company. Configure a dedicated schema.");
+  });
   return db;
 }
 var migrated;
@@ -800,7 +821,7 @@ var init_storage = __esm({
 // src/bom.ts
 import { createHash as createHash3 } from "node:crypto";
 import { parse as parseYaml } from "yaml";
-function text3(value, label2, problems, max = MAX_TEXT2) {
+function text3(value, label2, problems, max = MAX_TEXT) {
   if (typeof value !== "string" || value.trim() === "") {
     problems.push(`${label2} is required`);
     return void 0;
@@ -809,13 +830,13 @@ function text3(value, label2, problems, max = MAX_TEXT2) {
     problems.push(`${label2} is longer than ${max} characters`);
     return void 0;
   }
-  if (CONTROL_CHARACTERS3.test(value)) {
+  if (CONTROL_CHARACTERS2.test(value)) {
     problems.push(`${label2} contains control characters`);
     return void 0;
   }
   return value.trim();
 }
-function quantity(value, label2, problems) {
+function quantity2(value, label2, problems) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     problems.push(`${label2} must be a positive number, found ${JSON.stringify(value)}`);
     return void 0;
@@ -863,7 +884,7 @@ function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = 
         problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
       }
     } else {
-      qty = quantity(line.qty, `${at} qty`, problems);
+      qty = quantity2(line.qty, `${at} qty`, problems);
       if (qty === void 0) continue;
     }
     let part;
@@ -1033,7 +1054,7 @@ function selectLines(bom, selections) {
     ignored: selections.filter((s) => !names.has(s.option))
   };
 }
-var PRODUCT_KEY, VARIANT_SKU, PART_REF, QUANTITY_SCALE2, MAX_QUANTITY, MAX_TEXT2, CONTROL_CHARACTERS3;
+var PRODUCT_KEY, VARIANT_SKU, PART_REF, QUANTITY_SCALE2, MAX_QUANTITY, MAX_TEXT, CONTROL_CHARACTERS2;
 var init_bom = __esm({
   "src/bom.ts"() {
     "use strict";
@@ -1042,8 +1063,8 @@ var init_bom = __esm({
     PART_REF = /^[a-z0-9][a-z0-9._-]*:[^\s][^\u0000-\u001f]{0,127}$/;
     QUANTITY_SCALE2 = 4;
     MAX_QUANTITY = 1e6;
-    MAX_TEXT2 = 500;
-    CONTROL_CHARACTERS3 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+    MAX_TEXT = 500;
+    CONTROL_CHARACTERS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
   }
 });
 
@@ -1147,7 +1168,7 @@ async function expandSale(db, input2) {
     let duplicates = 0;
     for (const line of lines) {
       const perUnit = line.qty;
-      const quantity2 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
+      const quantity3 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
         label: `Consumption of ${line.part}`,
         positive: true
       });
@@ -1156,7 +1177,7 @@ async function expandSale(db, input2) {
         {
           part: parsePartRef(line.part),
           entryType: "sale",
-          quantity: quantity2,
+          quantity: quantity3,
           reference: input2.reference,
           // The reference is the BigCommerce order id and line, so repeating it
           // is the same sale. The part is added by `appendEntry` from the
@@ -1185,9 +1206,9 @@ async function expandSale(db, input2) {
       );
       if (result.duplicate) {
         duplicates += 1;
-        if (result.entry.quantityDelta !== -quantity2) {
+        if (result.entry.quantityDelta !== -quantity3) {
           throw new InputError(
-            `Reference "${input2.reference}" already consumed ${-result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. A sale that really did change quantity needs a new reference; a BOM that changed needs an adjustment.`
+            `Reference "${input2.reference}" already consumed ${-result.entry.quantityDelta} of ${result.part.ref}, not ${quantity3}. Nothing was changed. A sale that really did change quantity needs a new reference; a BOM that changed needs an adjustment.`
           );
         }
       }
@@ -1195,7 +1216,7 @@ async function expandSale(db, input2) {
         partId: result.part.partId,
         partRef: result.part.ref,
         quantityPerUnit: perUnit,
-        quantityConsumed: quantity2,
+        quantityConsumed: quantity3,
         ...line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {},
         duplicate: result.duplicate,
         onHand: result.stock.onHand
@@ -1946,8 +1967,8 @@ function assert(_) {
 }
 function getEnumValues(entries2) {
   const numericValues = Object.values(entries2).filter((v) => typeof v === "number");
-  const values2 = Object.entries(entries2).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
-  return values2;
+  const values = Object.entries(entries2).filter(([k, _]) => numericValues.indexOf(+k) === -1).map(([_, v]) => v);
+  return values;
 }
 function joinValues(array2, separator = "|") {
   return array2.map((val) => stringifyPrimitive(val)).join(separator);
@@ -5141,10 +5162,10 @@ function getDiscriminatedOption(union2, value) {
 function discriminatorMap(def2) {
   const map2 = /* @__PURE__ */ new Map();
   for (const option of def2.options) {
-    const values2 = option._zod.propValues?.[def2.discriminator];
-    if (!values2 || values2.size === 0)
+    const values = option._zod.propValues?.[def2.discriminator];
+    if (!values || values.size === 0)
       throw new Error(`Invalid discriminated union option at index "${def2.options.indexOf(option)}"`);
-    for (const value of values2) {
+    for (const value of values) {
       if (map2.has(value)) {
         if (value !== void 0)
           throw new Error(`Duplicate discriminator value "${String(value)}"`);
@@ -5474,11 +5495,11 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def2) => {
       return payload;
     }
     const proms = [];
-    const values2 = def2.keyType._zod.values;
-    if (values2 && !def2.partial) {
+    const values = def2.keyType._zod.values;
+    if (values && !def2.partial) {
       payload.value = memo2 ? memo2.alloc(inst, payload, {}, ctx) : {};
       const recordKeys = /* @__PURE__ */ new Set();
-      for (const key of values2) {
+      for (const key of values) {
         if (typeof key === "string" || typeof key === "number" || typeof key === "symbol") {
           recordKeys.add(typeof key === "number" ? key.toString() : key);
           if (key === "__proto__")
@@ -5564,7 +5585,7 @@ var $ZodRecord = /* @__PURE__ */ $constructor("$ZodRecord", (inst, def2) => {
         if (keyResult.issues.length) {
           if (def2.mode === "loose") {
             payload.value[key] = input2[key];
-          } else if (values2) {
+          } else if (values) {
             unrecognized = unrecognized ?? [];
             unrecognized.push(key);
           } else {
@@ -5729,8 +5750,8 @@ function handleSetResult(result, final) {
 }
 var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
   $ZodType.init(inst, def2);
-  const values2 = getEnumValues(def2.entries);
-  const valuesSet = new Set(values2);
+  const values = getEnumValues(def2.entries);
+  const valuesSet = new Set(values);
   inst._zod.values = valuesSet;
   defineLazyInternal(inst, "pattern", (zod) => {
     const patternValues = getEnumValues(zod.def.entries).filter((k) => propertyKeyTypes.has(typeof k));
@@ -5743,7 +5764,7 @@ var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
     }
     payload.issues.push({
       code: "invalid_value",
-      values: values2,
+      values,
       input: input2,
       inst
     });
@@ -5752,15 +5773,15 @@ var $ZodEnum = /* @__PURE__ */ $constructor("$ZodEnum", (inst, def2) => {
 });
 var $ZodLiteral = /* @__PURE__ */ $constructor("$ZodLiteral", (inst, def2) => {
   $ZodType.init(inst, def2);
-  const values2 = new Set(def2.values);
-  inst._zod.values = values2;
+  const values = new Set(def2.values);
+  inst._zod.values = values;
   defineLazyInternal(inst, "pattern", (zod) => {
     const vals = zod.def.values;
     return new RegExp(vals.length ? `^(${vals.map((o) => typeof o === "string" ? escapeRegex(o) : o ? escapeRegex(o.toString()) : String(o)).join("|")})$` : "^[^\\s\\S]$");
   });
   inst._zod.parse = (payload, _ctx) => {
     const input2 = payload.value;
-    if (values2.has(input2)) {
+    if (values.has(input2)) {
       return payload;
     }
     payload.issues.push({
@@ -5819,8 +5840,8 @@ var $ZodOptional = /* @__PURE__ */ $constructor("$ZodOptional", (inst, def2) => 
   defineLazyInternal(inst, "optin", (zod) => zod.def.innerType._zod.optin === "defaulted" ? "defaulted" : "optional");
   inst._zod.optout = "optional";
   defineLazyInternal(inst, "values", (zod) => {
-    const values2 = zod.def.innerType._zod.values;
-    return values2 ? /* @__PURE__ */ new Set([...values2, void 0]) : void 0;
+    const values = zod.def.innerType._zod.values;
+    return values ? /* @__PURE__ */ new Set([...values, void 0]) : void 0;
   });
   defineLazyInternal(inst, "pattern", (zod) => {
     const pattern = zod.def.innerType._zod.pattern;
@@ -10618,8 +10639,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text5) => {
-  return text5.charAt(0).toUpperCase() + text5.slice(1);
+var capitalizeFirstCharacter = (text4) => {
+  return text4.charAt(0).toUpperCase() + text4.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -15276,15 +15297,15 @@ function generateArrayCheck(doc, ctx, schema, accessor, buildsValue = true) {
 }
 function generateLiteralCheck(doc, ctx, schema, accessor) {
   const def2 = schema._zod.def;
-  const values2 = def2.values;
-  if (values2.length !== 1) {
-    const literalSet = addConstant(ctx, new Set(values2));
+  const values = def2.values;
+  if (values.length !== 1) {
+    const literalSet = addConstant(ctx, new Set(values));
     doc.write(`if (!${literalSet}.has(${accessor})) return INVALID;`);
     return accessor;
   }
-  const value = values2[0];
+  const value = values[0];
   if (typeof value === "number" && Number.isNaN(value)) {
-    const literalSet = addConstant(ctx, new Set(values2));
+    const literalSet = addConstant(ctx, new Set(values));
     doc.write(`if (!${literalSet}.has(${accessor})) return INVALID;`);
     return accessor;
   }
@@ -15304,11 +15325,11 @@ function generateLiteralCheck(doc, ctx, schema, accessor) {
   return accessor;
 }
 function generateEnumCheck(doc, ctx, schema, accessor) {
-  const values2 = schema._zod.values;
-  if (!values2) {
+  const values = schema._zod.values;
+  if (!values) {
     throw new ZodCompileUnsupportedError("enum schema without enumerated values");
   }
-  const enumSet = addConstant(ctx, values2);
+  const enumSet = addConstant(ctx, values);
   doc.write(`if (!${enumSet}.has(${accessor})) return INVALID;`);
   return accessor;
 }
@@ -15457,8 +15478,8 @@ function generateUnionCheck(doc, ctx, schema, accessor) {
   }
   const allLiterals = options.every((opt) => opt._zod.def.type === "literal" && !opt._zod.def.checks?.length);
   if (allLiterals) {
-    const values2 = new Set(options.flatMap((opt) => opt._zod.def.values));
-    const valuesConst = addConstant(ctx, values2);
+    const values = new Set(options.flatMap((opt) => opt._zod.def.values));
+    const valuesConst = addConstant(ctx, values);
     doc.write(`if (!${valuesConst}.has(${accessor})) return INVALID;`);
     return accessor;
   }
@@ -15495,17 +15516,17 @@ function generateDiscriminatedUnionCheck(doc, ctx, def2, accessor) {
   let firstBranch = true;
   const claimed = /* @__PURE__ */ new Set();
   for (const option of def2.options) {
-    const values2 = option._zod.propValues?.[def2.discriminator];
-    if (!values2 || values2.size === 0) {
+    const values = option._zod.propValues?.[def2.discriminator];
+    if (!values || values.size === 0) {
       throw new ZodCompileUnsupportedError("discriminated union option without static discriminator values");
     }
-    for (const value of values2) {
+    for (const value of values) {
       if (claimed.has(value)) {
         throw new ZodCompileUnsupportedError(`duplicate discriminator value ${String(value)}`);
       }
       claimed.add(value);
     }
-    const conditions = Array.from(values2, (value) => literalEquality(ctx, discVar, value));
+    const conditions = Array.from(values, (value) => literalEquality(ctx, discVar, value));
     const prefix = firstBranch ? "if" : "else if";
     doc.write(`${prefix} (${conditions.join(" || ")}) {`);
     doc.indented((d) => {
@@ -16607,8 +16628,8 @@ function _set(Class2, valueType, params2) {
   });
 }
 // @__NO_SIDE_EFFECTS__
-function _enum(Class2, values2, params2) {
-  const entries2 = Array.isArray(values2) ? Object.fromEntries(values2.map((v) => [v, v])) : values2;
+function _enum(Class2, values, params2) {
+  const entries2 = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
   return new Class2({
     type: "enum",
     entries: entries2,
@@ -16915,13 +16936,13 @@ function initializeContext(params2) {
     external: params2?.external ?? void 0
   };
 }
-function handleUnrepresentable(schema, ctx, json2, params2, message2) {
+function handleUnrepresentable(schema, ctx, json3, params2, message2) {
   const result = typeof ctx.unrepresentable === "function" ? ctx.unrepresentable({ zodSchema: schema, path: params2.path, message: message2 }) : ctx.unrepresentable;
   if (result === "any")
     return false;
   if (result === void 0 || result === "throw")
     throw new Error(message2);
-  Object.assign(json2, result);
+  Object.assign(json3, result);
   return true;
 }
 function processSchema(schema, ctx, _params = { path: [], schemaPath: [] }) {
@@ -17157,12 +17178,12 @@ function foldObjects(members2) {
   }
   return folded;
 }
-function foldIntersection(json2) {
-  const allOf = json2.allOf;
+function foldIntersection(json3) {
+  const allOf = json3.allOf;
   if (!Array.isArray(allOf) || allOf.length < 2)
     return;
   for (const key of FOLDABLE_KEYS)
-    if (key in json2)
+    if (key in json3)
       return;
   const unions = allOf.filter((m) => UNION_KEYS.some((k) => Array.isArray(m[k])));
   let folded = null;
@@ -17181,8 +17202,8 @@ function foldIntersection(json2) {
   }
   if (!folded)
     return;
-  delete json2.allOf;
-  assignProps(json2, folded);
+  delete json3.allOf;
+  assignProps(json3, folded);
 }
 function finalize(ctx, schema) {
   const root = ctx.seen.get(schema);
@@ -17264,20 +17285,20 @@ function finalize(ctx, schema) {
     if (ctx.intersections.length) {
       const carriers = /* @__PURE__ */ new Map();
       for (const seen of ctx.seen.values()) {
-        for (const json2 of [seen.schema, seen.def]) {
-          const allOf = json2?.allOf;
+        for (const json3 of [seen.schema, seen.def]) {
+          const allOf = json3?.allOf;
           if (!Array.isArray(allOf))
             continue;
           const existing = carriers.get(allOf);
           if (existing)
-            existing.push(json2);
+            existing.push(json3);
           else
-            carriers.set(allOf, [json2]);
+            carriers.set(allOf, [json3]);
         }
       }
       for (const allOf of ctx.intersections) {
-        for (const json2 of carriers.get(allOf) ?? [])
-          foldIntersection(json2);
+        for (const json3 of carriers.get(allOf) ?? [])
+          foldIntersection(json3);
       }
     }
   }
@@ -17512,29 +17533,29 @@ var exactPatterns = /* @__PURE__ */ new Map([
 ]);
 var exactPattern = (p) => exactPatterns.get(p) ?? p;
 var stringProcessor = (schema, ctx, _json, _params) => {
-  const json2 = _json;
-  json2.type = "string";
+  const json3 = _json;
+  json3.type = "string";
   const { minimum, maximum, format, patterns, contentEncoding, laxFormat } = aggregateChecks(schema);
   if (typeof minimum === "number")
-    json2.minLength = minimum;
+    json3.minLength = minimum;
   if (typeof maximum === "number")
-    json2.maxLength = maximum;
+    json3.maxLength = maximum;
   if (format) {
-    json2.format = formatMap[format] ?? format;
-    if (json2.format === "")
-      delete json2.format;
+    json3.format = formatMap[format] ?? format;
+    if (json3.format === "")
+      delete json3.format;
     if (format === "time" || laxFormat) {
-      delete json2.format;
+      delete json3.format;
     }
   }
   if (contentEncoding)
-    json2.contentEncoding = contentEncoding;
+    json3.contentEncoding = contentEncoding;
   if (patterns && patterns.size > 0) {
     const patternList = [...patterns].map(exactPattern);
     if (patternList.length === 1)
-      json2.pattern = patternList[0].source;
+      json3.pattern = patternList[0].source;
     else if (patternList.length > 1) {
-      json2.allOf = [
+      json3.allOf = [
         ...patternList.map((regex) => ({
           ...ctx.target === "draft-07" || ctx.target === "draft-04" || ctx.target === "openapi-3.0" ? { type: "string" } : {},
           pattern: regex.source
@@ -17544,31 +17565,31 @@ var stringProcessor = (schema, ctx, _json, _params) => {
   }
 };
 var numberProcessor = (schema, ctx, _json, params2) => {
-  const json2 = _json;
+  const json3 = _json;
   const { minimum, maximum, multipleOf, exclusiveMaximum, exclusiveMinimum, isInt } = aggregateChecks(schema);
-  json2.type = isInt ? "integer" : "number";
+  json3.type = isInt ? "integer" : "number";
   const exMin = typeof exclusiveMinimum === "number" && exclusiveMinimum >= (minimum ?? Number.NEGATIVE_INFINITY);
   const exMax = typeof exclusiveMaximum === "number" && exclusiveMaximum <= (maximum ?? Number.POSITIVE_INFINITY);
   const legacy = ctx.target === "draft-04" || ctx.target === "openapi-3.0";
   if (exMin) {
     if (legacy) {
-      json2.minimum = exclusiveMinimum;
-      json2.exclusiveMinimum = true;
+      json3.minimum = exclusiveMinimum;
+      json3.exclusiveMinimum = true;
     } else {
-      json2.exclusiveMinimum = exclusiveMinimum;
+      json3.exclusiveMinimum = exclusiveMinimum;
     }
   } else if (typeof minimum === "number") {
-    json2.minimum = minimum;
+    json3.minimum = minimum;
   }
   if (exMax) {
     if (legacy) {
-      json2.maximum = exclusiveMaximum;
-      json2.exclusiveMaximum = true;
+      json3.maximum = exclusiveMaximum;
+      json3.exclusiveMaximum = true;
     } else {
-      json2.exclusiveMaximum = exclusiveMaximum;
+      json3.exclusiveMaximum = exclusiveMaximum;
     }
   } else if (typeof maximum === "number") {
-    json2.maximum = maximum;
+    json3.maximum = maximum;
   }
   if (multipleOf) {
     const divisors = /* @__PURE__ */ new Set();
@@ -17576,75 +17597,75 @@ var numberProcessor = (schema, ctx, _json, params2) => {
       if (Number.isFinite(divisor) && divisor !== 0)
         divisors.add(Math.abs(divisor));
       else
-        handleUnrepresentable(schema, ctx, json2, params2, `A multipleOf divisor of ${divisor} cannot be represented in JSON Schema`);
+        handleUnrepresentable(schema, ctx, json3, params2, `A multipleOf divisor of ${divisor} cannot be represented in JSON Schema`);
     }
     const [first, ...rest] = divisors;
     if (first !== void 0)
-      json2.multipleOf = first;
+      json3.multipleOf = first;
     if (rest.length)
-      json2.allOf = [...json2.allOf ?? [], ...rest.map((m) => ({ multipleOf: m }))];
+      json3.allOf = [...json3.allOf ?? [], ...rest.map((m) => ({ multipleOf: m }))];
   }
 };
-var booleanProcessor = (_schema, _ctx, json2, _params) => {
-  json2.type = "boolean";
+var booleanProcessor = (_schema, _ctx, json3, _params) => {
+  json3.type = "boolean";
 };
-var bigintProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "BigInt cannot be represented in JSON Schema");
+var bigintProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "BigInt cannot be represented in JSON Schema");
 };
-var symbolProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Symbols cannot be represented in JSON Schema");
+var symbolProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Symbols cannot be represented in JSON Schema");
 };
-var nullProcessor = (_schema, ctx, json2, _params) => {
+var nullProcessor = (_schema, ctx, json3, _params) => {
   if (ctx.target === "openapi-3.0") {
-    json2.type = "string";
-    json2.nullable = true;
-    json2.enum = [null];
+    json3.type = "string";
+    json3.nullable = true;
+    json3.enum = [null];
   } else {
-    json2.type = "null";
+    json3.type = "null";
   }
 };
-var undefinedProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Undefined cannot be represented in JSON Schema");
+var undefinedProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Undefined cannot be represented in JSON Schema");
 };
-var voidProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Void cannot be represented in JSON Schema");
+var voidProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Void cannot be represented in JSON Schema");
 };
-var neverProcessor = (_schema, _ctx, json2, _params) => {
-  json2.not = {};
+var neverProcessor = (_schema, _ctx, json3, _params) => {
+  json3.not = {};
 };
 var anyProcessor = (_schema, _ctx, _json, _params) => {
 };
 var unknownProcessor = (_schema, _ctx, _json, _params) => {
 };
-var dateProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Date cannot be represented in JSON Schema");
+var dateProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Date cannot be represented in JSON Schema");
 };
-var enumProcessor = (schema, _ctx, json2, _params) => {
+var enumProcessor = (schema, _ctx, json3, _params) => {
   const def2 = schema._zod.def;
-  const values2 = getEnumValues(def2.entries);
-  if (values2.length === 0) {
-    json2.not = {};
+  const values = getEnumValues(def2.entries);
+  if (values.length === 0) {
+    json3.not = {};
     return;
   }
-  if (values2.every((v) => typeof v === "number"))
-    json2.type = "number";
-  if (values2.every((v) => typeof v === "string"))
-    json2.type = "string";
-  json2.enum = values2;
+  if (values.every((v) => typeof v === "number"))
+    json3.type = "number";
+  if (values.every((v) => typeof v === "string"))
+    json3.type = "string";
+  json3.enum = values;
 };
-var literalProcessor = (schema, ctx, json2, params2) => {
+var literalProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   if (def2.values.length === 0) {
-    json2.not = {};
+    json3.not = {};
     return;
   }
   const vals = [];
   for (const val of def2.values) {
     if (val === void 0) {
-      if (handleUnrepresentable(schema, ctx, json2, params2, "Literal `undefined` cannot be represented in JSON Schema"))
+      if (handleUnrepresentable(schema, ctx, json3, params2, "Literal `undefined` cannot be represented in JSON Schema"))
         return;
     } else if (typeof val === "bigint") {
-      if (handleUnrepresentable(schema, ctx, json2, params2, "BigInt literals cannot be represented in JSON Schema"))
+      if (handleUnrepresentable(schema, ctx, json3, params2, "BigInt literals cannot be represented in JSON Schema"))
         return;
       vals.push(Number(val));
     } else {
@@ -17654,37 +17675,37 @@ var literalProcessor = (schema, ctx, json2, params2) => {
   if (vals.length === 0) {
   } else if (vals.length === 1) {
     const val = vals[0];
-    json2.type = val === null ? "null" : typeof val;
+    json3.type = val === null ? "null" : typeof val;
     if (ctx.target === "draft-04" || ctx.target === "openapi-3.0") {
-      json2.enum = [val];
+      json3.enum = [val];
     } else {
-      json2.const = val;
+      json3.const = val;
     }
   } else {
     if (vals.every((v) => typeof v === "number"))
-      json2.type = "number";
+      json3.type = "number";
     if (vals.every((v) => typeof v === "string"))
-      json2.type = "string";
+      json3.type = "string";
     if (vals.every((v) => typeof v === "boolean"))
-      json2.type = "boolean";
+      json3.type = "boolean";
     if (vals.every((v) => v === null))
-      json2.type = "null";
-    json2.enum = vals;
+      json3.type = "null";
+    json3.enum = vals;
   }
 };
-var nanProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "NaN cannot be represented in JSON Schema");
+var nanProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "NaN cannot be represented in JSON Schema");
 };
-var templateLiteralProcessor = (schema, _ctx, json2, _params) => {
-  const _json = json2;
+var templateLiteralProcessor = (schema, _ctx, json3, _params) => {
+  const _json = json3;
   const pattern = schema._zod.pattern;
   if (!pattern)
     throw new Error("Pattern not found in template literal");
   _json.type = "string";
   _json.pattern = pattern.source;
 };
-var fileProcessor = (schema, _ctx, json2, _params) => {
-  const _json = json2;
+var fileProcessor = (schema, _ctx, json3, _params) => {
+  const _json = json3;
   _json.type = "string";
   _json.format = "binary";
   _json.contentEncoding = "binary";
@@ -17702,34 +17723,34 @@ var fileProcessor = (schema, _ctx, json2, _params) => {
   else
     _json.anyOf = mime.map((m) => ({ contentMediaType: m }));
 };
-var successProcessor = (_schema, _ctx, json2, _params) => {
-  json2.type = "boolean";
+var successProcessor = (_schema, _ctx, json3, _params) => {
+  json3.type = "boolean";
 };
-var customProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Custom types cannot be represented in JSON Schema");
+var customProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Custom types cannot be represented in JSON Schema");
 };
-var functionProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Function types cannot be represented in JSON Schema");
+var functionProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Function types cannot be represented in JSON Schema");
 };
-var transformProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Transforms cannot be represented in JSON Schema");
+var transformProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Transforms cannot be represented in JSON Schema");
 };
-var mapProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Map cannot be represented in JSON Schema");
+var mapProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Map cannot be represented in JSON Schema");
 };
-var setProcessor = (schema, ctx, json2, params2) => {
-  handleUnrepresentable(schema, ctx, json2, params2, "Set cannot be represented in JSON Schema");
+var setProcessor = (schema, ctx, json3, params2) => {
+  handleUnrepresentable(schema, ctx, json3, params2, "Set cannot be represented in JSON Schema");
 };
 var arrayProcessor = (schema, ctx, _json, params2) => {
-  const json2 = _json;
+  const json3 = _json;
   const def2 = schema._zod.def;
   const { minimum, maximum } = aggregateChecks(schema);
   if (typeof minimum === "number")
-    json2.minItems = minimum;
+    json3.minItems = minimum;
   if (typeof maximum === "number")
-    json2.maxItems = maximum;
-  json2.type = "array";
-  json2.items = processSchema(def2.element, ctx, {
+    json3.maxItems = maximum;
+  json3.type = "array";
+  json3.items = processSchema(def2.element, ctx, {
     ...params2,
     path: [...params2.path, "items"]
   });
@@ -17745,17 +17766,17 @@ function inputOptin(schema) {
   return schema._zod.optin;
 }
 var objectProcessor = (schema, ctx, _json, params2) => {
-  const json2 = _json;
+  const json3 = _json;
   const def2 = schema._zod.def;
   const shape = def2.shape;
   const symbolKeys = Object.getOwnPropertySymbols(shape);
-  if (symbolKeys.length && handleUnrepresentable(schema, ctx, json2, params2, "Symbol keys cannot be represented in JSON Schema")) {
+  if (symbolKeys.length && handleUnrepresentable(schema, ctx, json3, params2, "Symbol keys cannot be represented in JSON Schema")) {
     return;
   }
-  json2.type = "object";
-  json2.properties = {};
+  json3.type = "object";
+  json3.properties = {};
   for (const key in shape) {
-    assignProp(json2.properties, key, processSchema(shape[key], ctx, {
+    assignProp(json3.properties, key, processSchema(shape[key], ctx, {
       ...params2,
       path: [...params2.path, "properties", key]
     }));
@@ -17768,21 +17789,21 @@ var objectProcessor = (schema, ctx, _json, params2) => {
     }
   }
   if (requiredKeys.length > 0) {
-    json2.required = requiredKeys;
+    json3.required = requiredKeys;
   }
   if (def2.catchall?._zod.def.type === "never") {
-    json2.additionalProperties = false;
+    json3.additionalProperties = false;
   } else if (!def2.catchall) {
     if (ctx.io === "output")
-      json2.additionalProperties = false;
+      json3.additionalProperties = false;
   } else if (def2.catchall) {
-    json2.additionalProperties = processSchema(def2.catchall, ctx, {
+    json3.additionalProperties = processSchema(def2.catchall, ctx, {
       ...params2,
       path: [...params2.path, "additionalProperties"]
     });
   }
 };
-var unionProcessor = (schema, ctx, json2, params2) => {
+var unionProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   const isExclusive = def2.inclusive === false;
   const options = def2.options.map((x, i) => processSchema(x, ctx, {
@@ -17790,12 +17811,12 @@ var unionProcessor = (schema, ctx, json2, params2) => {
     path: [...params2.path, isExclusive ? "oneOf" : "anyOf", i]
   }));
   if (isExclusive) {
-    json2.oneOf = options;
+    json3.oneOf = options;
   } else {
-    json2.anyOf = options;
+    json3.anyOf = options;
   }
 };
-var intersectionProcessor = (schema, ctx, json2, params2) => {
+var intersectionProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   const a = processSchema(def2.left, ctx, {
     ...params2,
@@ -17810,13 +17831,13 @@ var intersectionProcessor = (schema, ctx, json2, params2) => {
     ...isSimpleIntersection(a) ? a.allOf : [a],
     ...isSimpleIntersection(b) ? b.allOf : [b]
   ];
-  json2.allOf = allOf;
+  json3.allOf = allOf;
   ctx.intersections.push(allOf);
 };
 var tupleProcessor = (schema, ctx, _json, params2) => {
-  const json2 = _json;
+  const json3 = _json;
   const def2 = schema._zod.def;
-  json2.type = "array";
+  json3.type = "array";
   const prefixPath = ctx.target === "draft-2020-12" ? "prefixItems" : "items";
   const restPath = ctx.target === "draft-2020-12" ? "items" : ctx.target === "openapi-3.0" ? "items" : "additionalItems";
   const prefixItems = def2.items.map((x, i) => processSchema(x, ctx, {
@@ -17838,70 +17859,70 @@ var tupleProcessor = (schema, ctx, _json, params2) => {
   const maxItems = def2.items.length;
   const isClosed = !def2.rest;
   if (ctx.target === "draft-2020-12") {
-    json2.prefixItems = prefixItems;
+    json3.prefixItems = prefixItems;
     if (isClosed) {
-      json2.items = false;
+      json3.items = false;
     } else if (rest) {
-      json2.items = rest;
+      json3.items = rest;
     }
     if (minItems > 0)
-      json2.minItems = minItems;
+      json3.minItems = minItems;
     if (isClosed)
-      json2.maxItems = maxItems;
+      json3.maxItems = maxItems;
   } else if (ctx.target === "openapi-3.0") {
-    json2.items = {
+    json3.items = {
       anyOf: prefixItems
     };
     if (rest) {
-      json2.items.anyOf.push(rest);
+      json3.items.anyOf.push(rest);
     }
     if (minItems > 0)
-      json2.minItems = minItems;
+      json3.minItems = minItems;
     if (isClosed)
-      json2.maxItems = maxItems;
+      json3.maxItems = maxItems;
   } else {
-    json2.items = prefixItems;
+    json3.items = prefixItems;
     if (isClosed) {
-      json2.additionalItems = false;
+      json3.additionalItems = false;
     } else if (rest) {
-      json2.additionalItems = rest;
+      json3.additionalItems = rest;
     }
     if (minItems > 0)
-      json2.minItems = minItems;
+      json3.minItems = minItems;
     if (isClosed)
-      json2.maxItems = maxItems;
+      json3.maxItems = maxItems;
   }
   const { minimum, maximum } = aggregateChecks(schema);
   if (typeof minimum === "number")
-    json2.minItems = minimum;
+    json3.minItems = minimum;
   if (typeof maximum === "number")
-    json2.maxItems = maximum;
+    json3.maxItems = maximum;
 };
-function stringifyKeyNames(bySchema, json2, visited) {
-  if (json2.$ref) {
-    if (visited.has(json2))
-      return json2;
-    visited.add(json2);
-    const def2 = bySchema.get(json2)?.def;
+function stringifyKeyNames(bySchema, json3, visited) {
+  if (json3.$ref) {
+    if (visited.has(json3))
+      return json3;
+    visited.add(json3);
+    const def2 = bySchema.get(json3)?.def;
     if (!def2)
-      return json2;
+      return json3;
     const inlined = stringifyKeyNames(bySchema, def2, visited);
-    return inlined === def2 ? json2 : inlined;
+    return inlined === def2 ? json3 : inlined;
   }
   for (const keyword of ["anyOf", "oneOf"]) {
-    const branches = json2[keyword];
+    const branches = json3[keyword];
     if (!Array.isArray(branches))
       continue;
     const mapped = branches.map((branch) => stringifyKeyNames(bySchema, branch, visited));
     if (mapped.some((branch, i) => branch !== branches[i]))
-      json2 = { ...json2, [keyword]: mapped };
+      json3 = { ...json3, [keyword]: mapped };
   }
-  const types = Array.isArray(json2.type) ? json2.type : [json2.type];
+  const types = Array.isArray(json3.type) ? json3.type : [json3.type];
   const numericType = !types.includes("string") && types.some((t) => t === "number" || t === "integer");
-  const values2 = json2.enum ?? (json2.const !== void 0 ? [json2.const] : void 0);
-  if (!numericType && !values2?.some((v) => typeof v === "number"))
-    return json2;
-  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf, format, id, ...rest } = json2;
+  const values = json3.enum ?? (json3.const !== void 0 ? [json3.const] : void 0);
+  if (!numericType && !values?.some((v) => typeof v === "number"))
+    return json3;
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf, format, id, ...rest } = json3;
   if (rest.enum)
     rest.enum = rest.enum.map((v) => typeof v === "number" ? String(v) : v);
   else if (typeof rest.const === "number")
@@ -17909,7 +17930,7 @@ function stringifyKeyNames(bySchema, json2, visited) {
   if (!numericType)
     return rest;
   rest.type = "string";
-  if (!values2)
+  if (!values)
     rest.pattern = (types.includes("number") ? number : integer).source;
   return rest;
 }
@@ -17941,9 +17962,9 @@ function rewriteKeyNames(ctx) {
   }
 }
 var recordProcessor = (schema, ctx, _json, params2) => {
-  const json2 = _json;
+  const json3 = _json;
   const def2 = schema._zod.def;
-  json2.type = "object";
+  json3.type = "object";
   const keyType = def2.keyType;
   const patterns = aggregateChecks(keyType).patterns;
   if (def2.mode === "loose" && patterns && patterns.size > 0) {
@@ -17951,13 +17972,13 @@ var recordProcessor = (schema, ctx, _json, params2) => {
       ...params2,
       path: [...params2.path, "patternProperties", "*"]
     });
-    json2.patternProperties = {};
+    json3.patternProperties = {};
     for (const pattern of patterns) {
-      assignProp(json2.patternProperties, exactPattern(pattern).source, valueSchema);
+      assignProp(json3.patternProperties, exactPattern(pattern).source, valueSchema);
     }
   } else {
     if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-      json2.propertyNames = processSchema(def2.keyType, ctx, {
+      json3.propertyNames = processSchema(def2.keyType, ctx, {
         ...params2,
         path: [...params2.path, "propertyNames"]
       });
@@ -17969,7 +17990,7 @@ var recordProcessor = (schema, ctx, _json, params2) => {
       }
       pending.push(schema);
     }
-    json2.additionalProperties = processSchema(def2.valueType, ctx, {
+    json3.additionalProperties = processSchema(def2.valueType, ctx, {
       ...params2,
       path: [...params2.path, "additionalProperties"]
     });
@@ -17979,19 +18000,19 @@ var recordProcessor = (schema, ctx, _json, params2) => {
   if (keyValues && !def2.partial && !omittableOnInput) {
     const validKeyValues = [...keyValues].filter((v) => typeof v === "string" || typeof v === "number");
     if (validKeyValues.length > 0) {
-      json2.required = validKeyValues.map(String);
+      json3.required = validKeyValues.map(String);
     }
   }
 };
-var nullableProcessor = (schema, ctx, json2, params2) => {
+var nullableProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   const inner = processSchema(def2.innerType, ctx, params2);
   const seen = ctx.seen.get(schema);
   if (ctx.target === "openapi-3.0") {
     seen.ref = def2.innerType;
-    json2.nullable = true;
+    json3.nullable = true;
   } else {
-    json2.anyOf = [inner, { type: "null" }];
+    json3.anyOf = [inner, { type: "null" }];
   }
 };
 var nonoptionalProcessor = (schema, ctx, _json, params2) => {
@@ -18001,7 +18022,7 @@ var nonoptionalProcessor = (schema, ctx, _json, params2) => {
   seen.ref = def2.innerType;
 };
 var UNREPRESENTABLE_DEFAULT = /* @__PURE__ */ Symbol();
-function serializeDefaultValue(value, schema, ctx, json2, params2) {
+function serializeDefaultValue(value, schema, ctx, json3, params2) {
   let unrepresentable = false;
   const serialized = JSON.stringify(value, (_, val) => {
     if (typeof val !== "bigint")
@@ -18011,30 +18032,30 @@ function serializeDefaultValue(value, schema, ctx, json2, params2) {
   });
   if (!unrepresentable)
     return JSON.parse(serialized);
-  handleUnrepresentable(schema, ctx, json2, params2, "BigInt defaults cannot be represented in JSON Schema");
+  handleUnrepresentable(schema, ctx, json3, params2, "BigInt defaults cannot be represented in JSON Schema");
   return UNREPRESENTABLE_DEFAULT;
 }
-var defaultProcessor = (schema, ctx, json2, params2) => {
+var defaultProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   processSchema(def2.innerType, ctx, params2);
   const seen = ctx.seen.get(schema);
   seen.ref = def2.innerType;
-  const value = serializeDefaultValue(def2.defaultValue, schema, ctx, json2, params2);
+  const value = serializeDefaultValue(def2.defaultValue, schema, ctx, json3, params2);
   if (value !== UNREPRESENTABLE_DEFAULT)
-    json2.default = value;
+    json3.default = value;
 };
-var prefaultProcessor = (schema, ctx, json2, params2) => {
+var prefaultProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   processSchema(def2.innerType, ctx, params2);
   const seen = ctx.seen.get(schema);
   seen.ref = def2.innerType;
   if (ctx.io !== "input")
     return;
-  const value = serializeDefaultValue(def2.defaultValue, schema, ctx, json2, params2);
+  const value = serializeDefaultValue(def2.defaultValue, schema, ctx, json3, params2);
   if (value !== UNREPRESENTABLE_DEFAULT)
-    json2._prefault = value;
+    json3._prefault = value;
 };
-var catchProcessor = (schema, ctx, json2, params2) => {
+var catchProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   processSchema(def2.innerType, ctx, params2);
   const seen = ctx.seen.get(schema);
@@ -18043,10 +18064,10 @@ var catchProcessor = (schema, ctx, json2, params2) => {
   try {
     catchValue = def2.catchValue(void 0);
   } catch {
-    handleUnrepresentable(schema, ctx, json2, params2, "Dynamic catch values are not supported in JSON Schema");
+    handleUnrepresentable(schema, ctx, json3, params2, "Dynamic catch values are not supported in JSON Schema");
     return;
   }
-  json2.default = catchValue;
+  json3.default = catchValue;
 };
 var pipeProcessor = (schema, ctx, _json, params2) => {
   const def2 = schema._zod.def;
@@ -18056,12 +18077,12 @@ var pipeProcessor = (schema, ctx, _json, params2) => {
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
 };
-var readonlyProcessor = (schema, ctx, json2, params2) => {
+var readonlyProcessor = (schema, ctx, json3, params2) => {
   const def2 = schema._zod.def;
   processSchema(def2.innerType, ctx, params2);
   const seen = ctx.seen.get(schema);
   seen.ref = def2.innerType;
-  json2.readOnly = true;
+  json3.readOnly = true;
 };
 var promiseProcessor = (schema, ctx, _json, params2) => {
   const def2 = schema._zod.def;
@@ -18703,7 +18724,7 @@ var _ZodString = /* @__PURE__ */ $constructor(
   (inst, def2) => {
     $ZodString.init(inst, def2);
     ZodType.init(inst, def2);
-    inst._zod.processJSONSchema = (ctx, json2, params2) => stringProcessor(inst, ctx, json2, params2);
+    inst._zod.processJSONSchema = (ctx, json3, params2) => stringProcessor(inst, ctx, json3, params2);
   },
   /* @__PURE__ */ util_exports.derived({
     format: (inst) => aggregateChecks(inst).format ?? null,
@@ -19062,7 +19083,7 @@ var ZodNumber = /* @__PURE__ */ $constructor(
   (inst, def2) => {
     $ZodNumber.init(inst, def2);
     ZodType.init(inst, def2);
-    inst._zod.processJSONSchema = (ctx, json2, params2) => numberProcessor(inst, ctx, json2, params2);
+    inst._zod.processJSONSchema = (ctx, json3, params2) => numberProcessor(inst, ctx, json3, params2);
     inst.isFinite = true;
   },
   /* @__PURE__ */ util_exports.derived({
@@ -19152,7 +19173,7 @@ function uint32(params2) {
 var ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def2) => {
   $ZodBoolean.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => booleanProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => booleanProcessor(inst, ctx, json3, params2);
 });
 function boolean2(params2) {
   return _boolean(ZodBoolean, params2);
@@ -19162,7 +19183,7 @@ var ZodBigInt = /* @__PURE__ */ $constructor(
   (inst, def2) => {
     $ZodBigInt.init(inst, def2);
     ZodType.init(inst, def2);
-    inst._zod.processJSONSchema = (ctx, json2, params2) => bigintProcessor(inst, ctx, json2, params2);
+    inst._zod.processJSONSchema = (ctx, json3, params2) => bigintProcessor(inst, ctx, json3, params2);
   },
   /* @__PURE__ */ util_exports.derived({
     minValue: (inst) => aggregateChecks(inst).minimum ?? null,
@@ -19220,7 +19241,7 @@ function uint64(params2) {
 var ZodSymbol = /* @__PURE__ */ $constructor("ZodSymbol", (inst, def2) => {
   $ZodSymbol.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => symbolProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => symbolProcessor(inst, ctx, json3, params2);
 });
 function symbol(params2) {
   return _symbol(ZodSymbol, params2);
@@ -19228,7 +19249,7 @@ function symbol(params2) {
 var ZodUndefined = /* @__PURE__ */ $constructor("ZodUndefined", (inst, def2) => {
   $ZodUndefined.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => undefinedProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => undefinedProcessor(inst, ctx, json3, params2);
 });
 function _undefined3(params2) {
   return _undefined2(ZodUndefined, params2);
@@ -19236,7 +19257,7 @@ function _undefined3(params2) {
 var ZodNull = /* @__PURE__ */ $constructor("ZodNull", (inst, def2) => {
   $ZodNull.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => nullProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => nullProcessor(inst, ctx, json3, params2);
 });
 function _null3(params2) {
   return _null2(ZodNull, params2);
@@ -19244,7 +19265,7 @@ function _null3(params2) {
 var ZodAny = /* @__PURE__ */ $constructor("ZodAny", (inst, def2) => {
   $ZodAny.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => anyProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => anyProcessor(inst, ctx, json3, params2);
 });
 function any() {
   return _any(ZodAny);
@@ -19252,7 +19273,7 @@ function any() {
 var ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def2) => {
   $ZodUnknown.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => unknownProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => unknownProcessor(inst, ctx, json3, params2);
 });
 function unknown() {
   return _unknown(ZodUnknown);
@@ -19260,7 +19281,7 @@ function unknown() {
 var ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def2) => {
   $ZodNever.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => neverProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => neverProcessor(inst, ctx, json3, params2);
 });
 function never(params2) {
   return _never(ZodNever, params2);
@@ -19268,7 +19289,7 @@ function never(params2) {
 var ZodVoid = /* @__PURE__ */ $constructor("ZodVoid", (inst, def2) => {
   $ZodVoid.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => voidProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => voidProcessor(inst, ctx, json3, params2);
 });
 function _void2(params2) {
   return _void(ZodVoid, params2);
@@ -19278,7 +19299,7 @@ var ZodDate = /* @__PURE__ */ $constructor(
   (inst, def2) => {
     $ZodDate.init(inst, def2);
     ZodType.init(inst, def2);
-    inst._zod.processJSONSchema = (ctx, json2, params2) => dateProcessor(inst, ctx, json2, params2);
+    inst._zod.processJSONSchema = (ctx, json3, params2) => dateProcessor(inst, ctx, json3, params2);
     inst.min = (value, params2) => inst.check(_gte(value, params2));
     inst.max = (value, params2) => inst.check(_lte(value, params2));
   },
@@ -19300,7 +19321,7 @@ var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodArray.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => arrayProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => arrayProcessor(inst, ctx, json3, params2);
   inst.element = def2.element;
 }, {
   min(n, params2) {
@@ -19330,7 +19351,7 @@ var ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodObjectJIT.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => objectProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => objectProcessor(inst, ctx, json3, params2);
   util_exports.installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
 }, {
   keyof() {
@@ -19403,7 +19424,7 @@ function looseObject(shape, params2) {
 var ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def2) => {
   $ZodUnion.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => unionProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => unionProcessor(inst, ctx, json3, params2);
   inst.options = def2.options;
 });
 function union(options, params2) {
@@ -19416,7 +19437,7 @@ function union(options, params2) {
 var ZodXor = /* @__PURE__ */ $constructor("ZodXor", (inst, def2) => {
   ZodUnion.init(inst, def2);
   $ZodXor.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => unionProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => unionProcessor(inst, ctx, json3, params2);
   inst.options = def2.options;
 });
 function xor(options, params2) {
@@ -19442,7 +19463,7 @@ function discriminatedUnion(discriminator, options, params2) {
 var ZodIntersection = /* @__PURE__ */ $constructor("ZodIntersection", (inst, def2) => {
   $ZodIntersection.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => intersectionProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => intersectionProcessor(inst, ctx, json3, params2);
 });
 function intersection(left, right) {
   return new ZodIntersection({
@@ -19455,7 +19476,7 @@ var ZodTuple = /* @__PURE__ */ $constructor("ZodTuple", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodTuple.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => tupleProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => tupleProcessor(inst, ctx, json3, params2);
 }, {
   rest(rest) {
     return this.clone({
@@ -19488,7 +19509,7 @@ var ZodRecord = /* @__PURE__ */ $constructor("ZodRecord", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodRecord.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => recordProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => recordProcessor(inst, ctx, json3, params2);
   inst.keyType = def2.keyType;
   inst.valueType = def2.valueType;
 });
@@ -19530,7 +19551,7 @@ var ZodMap = /* @__PURE__ */ $constructor("ZodMap", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodMap.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => mapProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => mapProcessor(inst, ctx, json3, params2);
   inst.keyType = def2.keyType;
   inst.valueType = def2.valueType;
   inst.min = (...args) => inst.check(_minSize(...args));
@@ -19550,7 +19571,7 @@ var ZodSet = /* @__PURE__ */ $constructor("ZodSet", (inst, def2) => {
   _ensureDefaultMemoizer();
   $ZodSet.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => setProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => setProcessor(inst, ctx, json3, params2);
   inst.min = (...args) => inst.check(_minSize(...args));
   inst.nonempty = (params2) => inst.check(_minSize(1, params2));
   inst.max = (...args) => inst.check(_maxSize(...args));
@@ -19566,13 +19587,13 @@ function set(valueType, params2) {
 var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
   $ZodEnum.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => enumProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => enumProcessor(inst, ctx, json3, params2);
   inst.enum = def2.entries;
   inst.options = [...inst._zod.values];
   const keys = new Set(Object.keys(def2.entries));
-  inst.extract = (values2, params2) => {
+  inst.extract = (values, params2) => {
     const newEntries = {};
-    for (const value of values2) {
+    for (const value of values) {
       if (keys.has(value)) {
         newEntries[value] = def2.entries[value];
       } else
@@ -19585,9 +19606,9 @@ var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
       entries: newEntries
     });
   };
-  inst.exclude = (values2, params2) => {
+  inst.exclude = (values, params2) => {
     const newEntries = { ...def2.entries };
-    for (const value of values2) {
+    for (const value of values) {
       if (keys.has(value)) {
         delete newEntries[value];
       } else
@@ -19601,8 +19622,8 @@ var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def2) => {
     });
   };
 });
-function _enum2(values2, params2) {
-  const entries2 = Array.isArray(values2) ? Object.fromEntries(values2.map((v) => [v, v])) : values2;
+function _enum2(values, params2) {
+  const entries2 = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
   return new ZodEnum({
     type: "enum",
     entries: entries2,
@@ -19619,7 +19640,7 @@ function nativeEnum(entries2, params2) {
 var ZodLiteral = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def2) => {
   $ZodLiteral.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => literalProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => literalProcessor(inst, ctx, json3, params2);
   inst.values = new Set(def2.values);
   Object.defineProperty(inst, "value", {
     get() {
@@ -19640,7 +19661,7 @@ function literal(value, params2) {
 var ZodFile = /* @__PURE__ */ $constructor("ZodFile", (inst, def2) => {
   $ZodFile.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => fileProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => fileProcessor(inst, ctx, json3, params2);
   inst.min = (size, params2) => inst.check(_minSize(size, params2));
   inst.max = (size, params2) => inst.check(_maxSize(size, params2));
   inst.mime = (types, params2) => inst.check(_mime(Array.isArray(types) ? types : [types], params2));
@@ -19652,7 +19673,7 @@ var ZodTransform = /* @__PURE__ */ $constructor("ZodTransform", (inst, def2) => 
   _ensureDefaultMemoizer();
   $ZodTransform.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => transformProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => transformProcessor(inst, ctx, json3, params2);
   inst._zod.parse = (payload, _ctx) => {
     if (_ctx.direction === "backward") {
       throw new $ZodEncodeError(inst.constructor.name);
@@ -19691,7 +19712,7 @@ function transform(fn) {
 var ZodOptional = /* @__PURE__ */ $constructor("ZodOptional", (inst, def2) => {
   $ZodOptional.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => optionalProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => optionalProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function optional(innerType) {
@@ -19703,7 +19724,7 @@ function optional(innerType) {
 var ZodExactOptional = /* @__PURE__ */ $constructor("ZodExactOptional", (inst, def2) => {
   $ZodExactOptional.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => optionalProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => optionalProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function exactOptional(innerType) {
@@ -19715,7 +19736,7 @@ function exactOptional(innerType) {
 var ZodNullable = /* @__PURE__ */ $constructor("ZodNullable", (inst, def2) => {
   $ZodNullable.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => nullableProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => nullableProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function nullable(innerType) {
@@ -19730,7 +19751,7 @@ function nullish2(innerType) {
 var ZodDefault = /* @__PURE__ */ $constructor("ZodDefault", (inst, def2) => {
   $ZodDefault.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => defaultProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => defaultProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
   inst.removeDefault = inst.unwrap;
 });
@@ -19746,7 +19767,7 @@ function _default2(innerType, defaultValue) {
 var ZodPrefault = /* @__PURE__ */ $constructor("ZodPrefault", (inst, def2) => {
   $ZodPrefault.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => prefaultProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => prefaultProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function prefault(innerType, defaultValue) {
@@ -19761,7 +19782,7 @@ function prefault(innerType, defaultValue) {
 var ZodNonOptional = /* @__PURE__ */ $constructor("ZodNonOptional", (inst, def2) => {
   $ZodNonOptional.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => nonoptionalProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => nonoptionalProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function nonoptional(innerType, params2) {
@@ -19774,7 +19795,7 @@ function nonoptional(innerType, params2) {
 var ZodSuccess = /* @__PURE__ */ $constructor("ZodSuccess", (inst, def2) => {
   $ZodSuccess.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => successProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => successProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function success(innerType) {
@@ -19786,7 +19807,7 @@ function success(innerType) {
 var ZodCatch = /* @__PURE__ */ $constructor("ZodCatch", (inst, def2) => {
   $ZodCatch.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => catchProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => catchProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
   inst.removeCatch = inst.unwrap;
 });
@@ -19800,7 +19821,7 @@ function _catch2(innerType, catchValue) {
 var ZodNaN = /* @__PURE__ */ $constructor("ZodNaN", (inst, def2) => {
   $ZodNaN.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => nanProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => nanProcessor(inst, ctx, json3, params2);
 });
 function nan(params2) {
   return _nan(ZodNaN, params2);
@@ -19808,7 +19829,7 @@ function nan(params2) {
 var ZodPipe = /* @__PURE__ */ $constructor("ZodPipe", (inst, def2) => {
   $ZodPipe.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => pipeProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => pipeProcessor(inst, ctx, json3, params2);
   inst.in = def2.in;
   inst.out = def2.out;
 });
@@ -19850,7 +19871,7 @@ var ZodPreprocess = /* @__PURE__ */ $constructor("ZodPreprocess", (inst, def2) =
 var ZodReadonly = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def2) => {
   $ZodReadonly.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => readonlyProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => readonlyProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function readonly(innerType) {
@@ -19862,7 +19883,7 @@ function readonly(innerType) {
 var ZodTemplateLiteral = /* @__PURE__ */ $constructor("ZodTemplateLiteral", (inst, def2) => {
   $ZodTemplateLiteral.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => templateLiteralProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => templateLiteralProcessor(inst, ctx, json3, params2);
 });
 function templateLiteral(parts, params2) {
   return new ZodTemplateLiteral({
@@ -19874,7 +19895,7 @@ function templateLiteral(parts, params2) {
 var ZodLazy = /* @__PURE__ */ $constructor("ZodLazy", (inst, def2) => {
   $ZodLazy.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => lazyProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => lazyProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.getter();
 });
 function lazy(getter) {
@@ -19886,7 +19907,7 @@ function lazy(getter) {
 var ZodPromise = /* @__PURE__ */ $constructor("ZodPromise", (inst, def2) => {
   $ZodPromise.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => promiseProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => promiseProcessor(inst, ctx, json3, params2);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function promise(innerType) {
@@ -19898,7 +19919,7 @@ function promise(innerType) {
 var ZodFunction = /* @__PURE__ */ $constructor("ZodFunction", (inst, def2) => {
   $ZodFunction.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => functionProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => functionProcessor(inst, ctx, json3, params2);
 });
 function _function(params2) {
   return new ZodFunction({
@@ -19910,7 +19931,7 @@ function _function(params2) {
 var ZodCustom = /* @__PURE__ */ $constructor("ZodCustom", (inst, def2) => {
   $ZodCustom.init(inst, def2);
   ZodType.init(inst, def2);
-  inst._zod.processJSONSchema = (ctx, json2, params2) => customProcessor(inst, ctx, json2, params2);
+  inst._zod.processJSONSchema = (ctx, json3, params2) => customProcessor(inst, ctx, json3, params2);
 });
 function check(fn) {
   const ch = new $ZodCheck({
@@ -29421,12 +29442,12 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
   const raw = firstQueryValue(value);
   if (raw === void 0 || raw === null || raw === "")
     return fallback;
-  const text5 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
-  if (!/^-?\d+$/.test(text5)) {
+  const text4 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!/^-?\d+$/.test(text4)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be an integer` });
     return fallback;
   }
-  const numeric = Number.parseInt(text5, 10);
+  const numeric = Number.parseInt(text4, 10);
   if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
     const range = min === 0 ? `between 0 and ${max}` : `between ${min} and ${max}`;
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be ${range}` });
@@ -29436,7 +29457,7 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
 }
 function parseEnumList(value, ctx, field2, allowed) {
   const allowedSet = new Set(allowed);
-  const values2 = [];
+  const values = [];
   for (const rawEntry of queryValues(value)) {
     if (typeof rawEntry !== "string") {
       ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be a comma-separated string` });
@@ -29450,11 +29471,11 @@ function parseEnumList(value, ctx, field2, allowed) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} contains an unsupported value` });
         continue;
       }
-      if (!values2.includes(item))
-        values2.push(item);
+      if (!values.includes(item))
+        values.push(item);
     }
   }
-  return values2;
+  return values;
 }
 function parseOptionalUuid(value, ctx, field2) {
   const normalized = parseOptionalString(value, ctx, field2);
@@ -30168,8 +30189,8 @@ var issueExecutionWorkspaceSettingsSchema = external_exports.object({
     allowFqdns: external_exports.array(external_exports.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/, "Network egress FQDNs must be hostnames without a URL scheme or path").max(253)).max(100).optional(),
     allowCidrs: external_exports.array(external_exports.string().trim().regex(ipv4CidrPattern, "Invalid IPv4 CIDR (must use octets 0-255 and prefix 0-32)").max(64).refine(isAllowedTaskEgressCidr, "Task-scoped network egress CIDRs cannot overlap private, loopback, link-local, CGNAT, or multicast ranges")).max(100).optional()
   }).strict().optional().nullable()
-}).strict().superRefine((settings, ctx) => {
-  if (settings.workspaceStrategy?.existingBranch && settings.mode !== "isolated_workspace") {
+}).strict().superRefine((settings2, ctx) => {
+  if (settings2.workspaceStrategy?.existingBranch && settings2.mode !== "isolated_workspace") {
     ctx.addIssue({
       code: external_exports.ZodIssueCode.custom,
       path: ["workspaceStrategy", "existingBranch"],
@@ -36845,7 +36866,7 @@ var SKILL_POLICY_SOURCE_TYPES = [
 var skillPolicyActionSchema = external_exports.enum(SKILL_POLICY_ACTIONS);
 var skillPolicySourceTypeSchema = external_exports.enum(SKILL_POLICY_SOURCE_TYPES);
 var skillPolicyEffectSchema = external_exports.enum(["allow", "deny"]);
-var nonEmptyUniqueStrings = external_exports.array(external_exports.string().trim().min(1).max(512)).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Values must be unique");
+var nonEmptyUniqueStrings = external_exports.array(external_exports.string().trim().min(1).max(512)).min(1).max(500).refine((values) => new Set(values).size === values.length, "Values must be unique");
 function isSafeSourceLocator(value) {
   if (/:\/\/[^/@\s]+:[^/@\s]+@/.test(value))
     return false;
@@ -36887,22 +36908,22 @@ var skillPolicySubjectSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("all_agents") }).strict(),
   external_exports.object({
     type: external_exports.literal("agents"),
-    agentIds: external_exports.array(external_exports.string().guid()).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Agent IDs must be unique")
+    agentIds: external_exports.array(external_exports.string().guid()).min(1).max(500).refine((values) => new Set(values).size === values.length, "Agent IDs must be unique")
   }).strict(),
   external_exports.object({ type: external_exports.literal("roles"), roles: nonEmptyUniqueStrings }).strict()
 ]);
 var skillPolicyResourceSelectorSchema = external_exports.object({
   skillIds: external_exports.array(external_exports.string().guid()).min(1).max(500).optional(),
   skillKeys: nonEmptyUniqueStrings.optional(),
-  sourceTypes: external_exports.array(skillPolicySourceTypeSchema).min(1).refine((values2) => new Set(values2).size === values2.length, "Source types must be unique").optional(),
-  sourceLocators: external_exports.array(skillPolicySourceLocatorSchema).min(1).max(500).refine((values2) => new Set(values2).size === values2.length, "Source locators must be unique").optional()
+  sourceTypes: external_exports.array(skillPolicySourceTypeSchema).min(1).refine((values) => new Set(values).size === values.length, "Source types must be unique").optional(),
+  sourceLocators: external_exports.array(skillPolicySourceLocatorSchema).min(1).max(500).refine((values) => new Set(values).size === values.length, "Source locators must be unique").optional()
 }).strict().refine((value) => Object.keys(value).length > 0, "At least one resource selector is required");
 var skillPolicyRuleSchema = external_exports.object({
   id: external_exports.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/),
   priority: external_exports.number().int().min(-1e6).max(1e6),
   effect: skillPolicyEffectSchema,
   subject: skillPolicySubjectSchema,
-  actions: external_exports.array(skillPolicyActionSchema).min(1).refine((values2) => new Set(values2).size === values2.length, "Actions must be unique"),
+  actions: external_exports.array(skillPolicyActionSchema).min(1).refine((values) => new Set(values).size === values.length, "Actions must be unique"),
   resources: skillPolicyResourceSelectorSchema.optional()
 }).strict();
 var skillPolicyDocumentSchema = external_exports.object({
@@ -43309,181 +43330,9 @@ init_errors();
 init_ledger();
 init_parts();
 init_quantity();
-init_storage();
-var MAX_TEXT = 500;
-var CONTROL_CHARACTERS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-function params(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new InputError("Tool parameters must be an object.");
-  }
-  return value;
-}
-function optionalText(value, label2) {
-  if (value === void 0 || value === null || value === "") return void 0;
-  if (typeof value !== "string") throw new InputError(`${label2} must be text.`);
-  const trimmed = value.trim();
-  if (trimmed === "") return void 0;
-  if (trimmed.length > MAX_TEXT) {
-    throw new InputError(`${label2} is longer than ${MAX_TEXT} characters.`);
-  }
-  if (CONTROL_CHARACTERS2.test(trimmed)) {
-    throw new InputError(`${label2} contains control characters.`);
-  }
-  return trimmed;
-}
-function requiredText(value, label2) {
-  const text5 = optionalText(value, label2);
-  if (text5 === void 0) throw new InputError(`${label2} is required.`);
-  return text5;
-}
-function provenanceOf(tool3, runCtx, extra) {
-  return {
-    ...extra,
-    source: tool3,
-    agentId: runCtx.agentId,
-    runId: runCtx.runId,
-    companyId: runCtx.companyId,
-    projectId: runCtx.projectId
-  };
-}
-function stockSummary(stock) {
-  return `${stock.ref}: ${stock.onHand} on hand, ${stock.onOrder} on order, ${stock.committed} committed.`;
-}
-function entryResult(tool3, result, verb) {
-  const content = result.duplicate ? `Already recorded \u2014 this ${verb} was submitted before, so nothing changed. ${stockSummary(result.stock)}` : `${verb[0].toUpperCase()}${verb.slice(1)} recorded. ${stockSummary(result.stock)}`;
-  return {
-    content,
-    data: {
-      tool: tool3,
-      recorded: !result.duplicate,
-      duplicate: result.duplicate,
-      entryId: result.entry.id,
-      entryType: result.entry.entryType,
-      quantityDelta: result.entry.quantityDelta,
-      partId: result.part.partId,
-      partRef: result.part.ref,
-      stock: {
-        onHand: result.stock.onHand,
-        onOrder: result.stock.onOrder,
-        committed: result.stock.committed,
-        available: result.stock.available
-      }
-    }
-  };
-}
-async function recordReceipt(ctx, rawParams, runCtx) {
-  const input2 = params(rawParams);
-  const part = parsePartRef(input2.partId);
-  const quantity2 = parseQuantity(input2.quantity, { label: "Quantity", positive: true });
-  const reference = requiredText(input2.reference, "A reference");
-  const delivery = optionalText(input2.delivery, "The delivery");
-  const note = optionalText(input2.note, "The note");
-  const db = await openStore(ctx, runCtx.companyId);
-  const result = await appendEntry(db, {
-    part,
-    entryType: "receipt",
-    quantity: quantity2,
-    reference,
-    idempotencyScope: delivery ? ["receipt", delivery] : ["receipt"],
-    note,
-    createMissingPart: part.kind === "vendor",
-    provenance: provenanceOf("record_receipt", runCtx, {
-      reference,
-      ...delivery ? { delivery } : {}
-    }),
-    createdBy: runCtx.agentId
-  });
-  if (result.duplicate && result.entry.quantityDelta !== quantity2) {
-    const which = delivery ? `Delivery "${delivery}" against reference "${reference}"` : `Reference "${reference}"`;
-    throw new InputError(
-      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`
-    );
-  }
-  return entryResult("record_receipt", result, "receipt");
-}
-async function recordAdjustment(ctx, rawParams, runCtx) {
-  const input2 = params(rawParams);
-  const part = parsePartRef(input2.partId);
-  const quantityDelta = parseQuantity(input2.quantityDelta, {
-    label: "The adjustment",
-    nonZero: true
-  });
-  const reason = requiredText(input2.reason, "A reason");
-  const reference = optionalText(input2.reference, "The reference");
-  const db = await openStore(ctx, runCtx.companyId);
-  const result = await appendEntry(db, {
-    part,
-    entryType: "adjustment",
-    quantity: quantityDelta,
-    // An adjustment with no external document still needs something
-    // traceable in the column, and the reason is what there is.
-    reference: reference ?? `adjustment: ${reason}`.slice(0, MAX_TEXT),
-    idempotencyScope: reference ? ["adjustment"] : void 0,
-    note: reason,
-    createMissingPart: part.kind === "vendor",
-    provenance: provenanceOf("record_adjustment", runCtx, {
-      reason,
-      ...reference ? { reference } : {}
-    }),
-    createdBy: runCtx.agentId
-  });
-  if (result.duplicate && result.entry.quantityDelta !== quantityDelta) {
-    throw new InputError(
-      `Reference "${reference}" was already used to adjust ${result.part.ref} by ${result.entry.quantityDelta}, not ${quantityDelta}. Nothing was changed.`
-    );
-  }
-  const base = entryResult("record_adjustment", result, "adjustment");
-  if (!result.duplicate && result.stock.onHand < 0) {
-    return {
-      ...base,
-      content: `${base.content} On hand is now negative, which an adjustment is allowed to do \u2014 check whether a receipt is missing.`
-    };
-  }
-  return base;
-}
-async function getStock(ctx, rawParams, runCtx) {
-  const input2 = params(rawParams);
-  const part = input2.partId === void 0 || input2.partId === null || input2.partId === "" ? void 0 : parsePartRef(input2.partId);
-  const db = await openStore(ctx, runCtx.companyId);
-  const rows = await readStock(db, part);
-  if (part && rows.length === 0) {
-    const ref = part.kind === "id" ? part.id : part.ref;
-    return {
-      content: `No part matches ${ref}. Nothing has been received or adjusted for it.`,
-      data: { parts: [], count: 0, matched: false }
-    };
-  }
-  const matched = part ? { matched: true } : {};
-  const content = part ? stockSummary(rows[0]) : rows.length === 0 ? "No parts yet. Nothing has been received or adjusted." : `${rows.length} part${rows.length === 1 ? "" : "s"}:
-${rows.map(stockSummary).join("\n")}`;
-  return {
-    content,
-    data: {
-      ...matched,
-      count: rows.length,
-      parts: rows.map((row) => ({
-        partId: row.partId,
-        partRef: row.ref,
-        vendor: row.vendor,
-        vendorPartNumber: row.vendorPartNumber,
-        description: row.description,
-        unitOfMeasure: row.unitOfMeasure,
-        onHand: row.onHand,
-        onOrder: row.onOrder,
-        committed: row.committed,
-        available: row.available,
-        lastEntryAt: row.lastEntryAt ? row.lastEntryAt.toISOString() : null
-      }))
-    }
-  };
-}
 
-// src/intake.ts
+// src/native.ts
 init_errors();
-init_ledger();
-init_parts();
-init_config();
-init_storage();
 
 // src/extraction.ts
 init_errors();
@@ -43559,6 +43408,397 @@ function reconcile(x) {
   return reasons;
 }
 
+// src/native.ts
+init_storage();
+
+// src/native-service.ts
+init_errors();
+import { randomUUID } from "node:crypto";
+init_quantity();
+init_config();
+init_ledger();
+init_parts();
+var uuid3 = (value, label2) => {
+  const v = text2(value, label2);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) throw new InputError(`${label2} must be a UUID.`);
+  return v;
+};
+var json2 = (value) => JSON.stringify(value);
+var quantity = (value, label2, nonnegative = true) => {
+  const n = parseQuantity(value, { label: label2 });
+  if (nonnegative && n < 0) throw new InputError(`${label2} cannot be negative.`);
+  return n;
+};
+var human = (actor) => {
+  if (actor.type !== "user" || !actor.id) throw new InputError("An authenticated human is required.");
+};
+function validatePolicy(value) {
+  const p = object2(value);
+  const enabledVendors2 = parseEnabledVendors(p.enabledVendors);
+  if (!["all", "threshold"].includes(String(p.approvalMode))) throw new InputError("Approval mode must be all or threshold.");
+  if (typeof p.allowSelfApproval !== "boolean") throw new InputError("Self approval policy must be boolean.");
+  if (!Array.isArray(p.approverUserIds) || p.approverUserIds.length > 100) throw new InputError("Approvers must be a list of human user IDs.");
+  return { enabledVendors: enabledVendors2, approvalMode: p.approvalMode, absoluteThreshold: quantity(p.absoluteThreshold, "Absolute threshold"), percentThreshold: quantity(p.percentThreshold, "Percent threshold"), approverUserIds: [...new Set(p.approverUserIds.map((v) => text2(v, "Approver ID", 200)))], allowSelfApproval: p.allowSelfApproval };
+}
+async function settings(client, lock2 = false) {
+  const r = await client.query(`SELECT settings,revision::text FROM operational_settings WHERE singleton=true${lock2 ? " FOR UPDATE" : ""}`);
+  return { settings: r.rows[0].settings, revision: r.rows[0].revision };
+}
+async function audit(client, actor, operation, target, before, after, reason) {
+  await client.query("INSERT INTO operational_audit(operation,target,before_value,after_value,reason,actor) VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6::jsonb)", [operation, target, json2(before), json2(after), reason, json2(actor)]);
+}
+async function lockParts(client, ids) {
+  await client.query("SELECT id FROM parts WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [ids]);
+}
+async function snapshot(client, partId) {
+  const r = await client.query(`SELECT p.id AS "partId",COALESCE(sum(e.on_hand_delta),0)::text AS expected,COALESCE(max(e.id),0)::text AS "ledgerRevision"
+ FROM parts p LEFT JOIN ledger_entries e ON e.part_id=p.id WHERE p.id=$1 GROUP BY p.id`, [partId]);
+  if (!r.rows[0]) throw new InputError("Part was not found.");
+  return { ...r.rows[0], expected: Number(r.rows[0].expected) };
+}
+function needsApproval(policy, lines) {
+  return lines.some((l) => {
+    const delta = Math.abs(l.counted - l.expected);
+    return delta > 0 && (policy.approvalMode === "all" || delta > policy.absoluteThreshold || (l.expected === 0 ? delta > 0 : delta / Math.abs(l.expected) * 100 > policy.percentThreshold));
+  });
+}
+function approver(actor, policy, submitter) {
+  human(actor);
+  if (policy.approverUserIds.length && !policy.approverUserIds.includes(actor.id)) throw new InputError("This human is not an authorized inventory approver.");
+  if (!policy.allowSelfApproval && submitter?.type === actor.type && submitter.id === actor.id) throw new InputError("The submitter cannot approve their own count.");
+}
+function countLines(input2, allowNegative = false) {
+  if (!Array.isArray(input2) || input2.length < 1 || input2.length > 200) throw new InputError("A batch requires 1\u2013200 count lines.");
+  const rows = input2.map((v) => {
+    const l = object2(v);
+    const revision = text2(String(l.ledgerRevision ?? ""), "Ledger revision");
+    if (!/^\d+$/.test(revision)) throw new InputError("Ledger revision must be an integer.");
+    return { partId: uuid3(l.partId, "Part ID"), expected: quantity(l.expected, "Expected", false), counted: quantity(l.counted, "Counted", !allowNegative), ledgerRevision: revision };
+  });
+  if (new Set(rows.map((r) => r.partId)).size !== rows.length) throw new InputError("A part may appear only once in a batch.");
+  return rows.sort((a, b) => a.partId.localeCompare(b.partId));
+}
+async function ensureSnapshot(client, lines) {
+  await lockParts(client, lines.map((l) => l.partId));
+  for (const line of lines) {
+    const current = await snapshot(client, line.partId);
+    if (current.ledgerRevision !== line.ledgerRevision || current.expected !== line.expected) throw new InputError("Stale stock snapshot. Preview and count again.");
+  }
+}
+async function applyCount(db, client, count, actor, reason) {
+  const raw = await client.query("SELECT * FROM physical_count_lines WHERE count_id=$1 ORDER BY part_id", [count.id]);
+  const lines = raw.rows.map((l) => ({ partId: l.part_id, expected: Number(l.expected), counted: Number(l.counted), ledgerRevision: String(l.ledger_revision) }));
+  await ensureSnapshot(client, lines);
+  await client.query("UPDATE physical_counts SET status='applying',decided_by=$2::jsonb,decided_at=now(),decision_reason=$3 WHERE id=$1", [count.id, json2(actor), reason]);
+  for (const l of raw.rows) {
+    const delta = Number((Number(l.counted) - Number(l.expected)).toFixed(4));
+    if (!delta) continue;
+    const result = await appendEntry(db, { part: { kind: "id", id: l.part_id }, entryType: "adjustment", quantity: delta, reference: `count:${count.id}`, idempotencyScope: ["count", count.id], countLineId: l.id, note: count.reason, createdBy: actor.id, provenance: { source: "physical_count", countId: count.id, countLineId: l.id, submitter: count.submitted_by, approver: actor, reason: count.reason, decisionReason: reason, policy: count.policy_snapshot, companyId: actor.companyId } }, client);
+    await client.query("UPDATE physical_count_lines SET ledger_entry_id=$2 WHERE id=$1", [l.id, result.entry.id]);
+  }
+  await client.query("UPDATE physical_counts SET status='applied' WHERE id=$1", [count.id]);
+  return { countId: count.id, status: "applied", duplicate: false };
+}
+async function submitCount(db, client, actor, input2, allowNegative = false) {
+  const lines = countLines(input2.lines, allowNegative);
+  const key = text2(input2.submissionKey, "Submission key");
+  const reason = text2(input2.reason, "Reason");
+  const current = await settings(client, true);
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`count:${key}`]);
+  const old = await client.query("SELECT * FROM physical_counts WHERE submission_key=$1", [key]);
+  const payload = { lines, reason };
+  if (old.rows[0]) {
+    if (json2(old.rows[0].payload) !== json2(JSON.parse(json2(payload)))) {
+      const stored = old.rows[0].payload;
+      if (stored.reason !== reason || json2(stored.lines.map((l) => [l.partId, l.expected, l.counted, l.ledgerRevision])) !== json2(lines.map((l) => [l.partId, l.expected, l.counted, l.ledgerRevision]))) throw new InputError("Submission key was already used with different counts.");
+    }
+    return { countId: old.rows[0].id, status: old.rows[0].status, duplicate: true };
+  }
+  await ensureSnapshot(client, lines);
+  const result = await client.query(`INSERT INTO physical_counts(submission_key,reason,submitted_by,policy_snapshot,settings_revision,payload,status)
+ VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6::jsonb,'pending') RETURNING *`, [key, reason, json2(actor), json2(current.settings), current.revision, json2(payload)]);
+  const count = result.rows[0];
+  for (const l of lines) await client.query("INSERT INTO physical_count_lines(count_id,part_id,expected,counted,ledger_revision) VALUES($1,$2,$3,$4,$5)", [count.id, l.partId, l.expected, l.counted, l.ledgerRevision]);
+  if (!needsApproval(current.settings, lines)) return applyCount(db, client, count, { ...actor }, "Applied automatically within configured discrepancy thresholds");
+  return { countId: count.id, status: "pending", duplicate: false };
+}
+async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, reason) {
+  await settings(client, true);
+  const previous = await client.query("SELECT * FROM physical_counts WHERE submission_key=$1", [submissionKey]);
+  if (previous.rows[0]) {
+    const old = previous.rows[0];
+    const actual = old.payload.lines.map((l) => [l.partId, Number((l.counted - l.expected).toFixed(4))]).sort();
+    const requested = deltas.map((l) => [l.partId, l.quantity]).sort();
+    if (old.reason !== reason || json2(actual) !== json2(requested)) throw new InputError("Adjustment batch key was already used with different quantities.");
+    return { countId: old.id, status: old.status, duplicate: true };
+  }
+  await lockParts(client, deltas.map((l) => l.partId));
+  const lines = [];
+  for (const delta of deltas) {
+    const snap = await snapshot(client, delta.partId);
+    lines.push({ ...snap, counted: Number((snap.expected + delta.quantity).toFixed(4)) });
+  }
+  return submitCount(db, client, actor, { lines, submissionKey, reason }, true);
+}
+async function orderRows(client, orderId) {
+  const order = await client.query("SELECT * FROM orders WHERE id=$1", [orderId]);
+  if (!order.rows[0]) throw new InputError("Order was not found.");
+  const r = await client.query(`SELECT p.id AS "partId",p.vendor,p.vendor_part_number AS "vendorPartNumber",p.description,sum(l.quantity)::text AS ordered,
+ max(l.unit_price)::text AS "unitCost",COALESCE((SELECT sum(e.quantity_delta) FROM ledger_entries e WHERE e.part_id=p.id AND e.reference=$2 AND e.entry_type='receipt'),0)::text AS received,
+ COALESCE((SELECT sum(c.quantity) FROM order_short_closes c WHERE c.order_id=$1 AND c.part_id=p.id),0)::text AS closed
+ FROM order_lines l JOIN parts p ON p.id=l.part_id WHERE l.order_id=$1 GROUP BY p.id ORDER BY p.id`, [orderId, order.rows[0].vendor_order_number]);
+  const lines = [];
+  for (const l of r.rows) lines.push({ ...l, ordered: Number(l.ordered), received: Number(l.received), closed: Number(l.closed), outstanding: Math.max(0, Number(l.ordered) - Number(l.received) - Number(l.closed)), ...await snapshot(client, l.partId) });
+  return { order: order.rows[0], lines };
+}
+async function executeNative(db, actor, operation, input2) {
+  if (!actor.id || !actor.companyId || !["user", "agent"].includes(actor.type)) throw new InputError("Authenticated actor and company are required.");
+  return db.transaction(async (client) => {
+    if (operation === "import_legacy_settings") {
+      human(actor);
+      const current = await settings(client, true);
+      approver(actor, current.settings);
+      const reason = text2(input2.reason, "Import reason");
+      if (String(input2.revision) !== current.revision) throw new InputError("Settings changed. Reload before importing.");
+      const prior = await client.query("SELECT id FROM operational_audit WHERE operation='import_legacy_settings' LIMIT 1");
+      if (prior.rowCount) throw new InputError("Legacy settings have already been imported. Use normal settings and part edits.");
+      const next = validatePolicy(input2.settings);
+      if (!Array.isArray(input2.parts) || input2.parts.length > 1e4) throw new InputError("Legacy parts must be a list with at most 10000 entries.");
+      const parts = input2.parts.map((v) => {
+        const p = object2(v);
+        if (typeof p.active !== "boolean") throw new InputError("Legacy active status must be boolean.");
+        return {
+          partId: uuid3(p.partId, "Part ID"),
+          reorderPoint: quantity(p.reorderPoint, "Reorder point"),
+          targetQuantity: quantity(p.targetQuantity, "Target quantity"),
+          location: p.location === "" ? "" : text2(p.location, "Location"),
+          notes: p.notes === "" ? "" : text2(p.notes, "Notes", 4e3),
+          active: p.active
+        };
+      });
+      if (new Set(parts.map((p) => p.partId)).size !== parts.length) throw new InputError("A legacy part may appear only once.");
+      await lockParts(client, parts.map((p) => p.partId));
+      for (const part of parts) {
+        const old = await client.query("SELECT * FROM parts WHERE id=$1", [part.partId]);
+        if (!old.rows[0]) throw new InputError("Legacy part was not found.");
+        await client.query("UPDATE parts SET reorder_point=$2,target_quantity=$3,storage_location=$4,notes=$5,active=$6,metadata_revision=metadata_revision+1 WHERE id=$1", [part.partId, part.reorderPoint, part.targetQuantity, part.location, part.notes, part.active]);
+        await audit(client, actor, "import_legacy_part", part.partId, old.rows[0], part, reason);
+      }
+      await client.query("UPDATE operational_settings SET settings=$1::jsonb,revision=revision+1,actor=$2::jsonb,updated_at=now() WHERE singleton=true", [json2(next), json2(actor)]);
+      await audit(client, actor, operation, "settings", current.settings, next, reason);
+      return { imported: true, parts: parts.length };
+    }
+    if (operation === "save_settings") {
+      human(actor);
+      const reason = text2(input2.reason, "Reason");
+      const current = await settings(client, true);
+      approver(actor, current.settings);
+      if (String(input2.revision) !== current.revision) throw new InputError("Settings changed. Reload before saving.");
+      const next = validatePolicy(input2.settings);
+      await client.query("UPDATE operational_settings SET settings=$1::jsonb,revision=revision+1,actor=$2::jsonb,updated_at=now() WHERE singleton=true", [json2(next), json2(actor)]);
+      await audit(client, actor, operation, "settings", current.settings, next, reason);
+      return { saved: true, revision: String(BigInt(current.revision) + 1n) };
+    }
+    if (operation === "edit_part") {
+      human(actor);
+      const id = uuid3(input2.partId, "Part ID"), reason = text2(input2.reason, "Reason");
+      const r = await client.query("SELECT * FROM parts WHERE id=$1 FOR UPDATE", [id]);
+      const old = r.rows[0];
+      if (!old) throw new InputError("Part was not found.");
+      if (String(input2.revision) !== String(old.metadata_revision)) throw new InputError("Part changed. Reload before saving.");
+      const reorder = quantity(input2.reorderPoint, "Reorder point"), target = quantity(input2.targetQuantity, "Target quantity");
+      if (typeof input2.active !== "boolean") throw new InputError("Active must be boolean.");
+      const location = input2.location === "" ? "" : text2(input2.location, "Location");
+      const notes = input2.notes === "" ? "" : text2(input2.notes, "Notes", 4e3);
+      await client.query("UPDATE parts SET reorder_point=$2,target_quantity=$3,storage_location=$4,notes=$5,active=$6,metadata_revision=metadata_revision+1 WHERE id=$1", [id, reorder, target, location, notes, input2.active]);
+      await audit(client, actor, operation, id, old, { reorderPoint: reorder, targetQuantity: target, location, notes, active: input2.active }, reason);
+      return { saved: true };
+    }
+    if (operation === "preview_count") {
+      if (!Array.isArray(input2.lines) || !input2.lines.length || input2.lines.length > 200) throw new InputError("A batch requires 1\u2013200 count lines.");
+      const requested = input2.lines.map((v) => {
+        const l = object2(v);
+        return { partId: uuid3(l.partId, "Part ID"), counted: quantity(l.counted, "Counted") };
+      });
+      if (new Set(requested.map((l) => l.partId)).size !== requested.length) throw new InputError("A part may appear only once in a batch.");
+      await lockParts(client, requested.map((l) => l.partId));
+      const policy = await settings(client);
+      const lines = [];
+      for (const l of requested) lines.push({ ...await snapshot(client, l.partId), counted: l.counted });
+      return { lines: lines.map((l) => ({ ...l, discrepancy: Number((l.counted - l.expected).toFixed(4)) })), policySnapshot: policy.settings, settingsRevision: policy.revision, requiresApproval: needsApproval(policy.settings, lines) };
+    }
+    if (operation === "submit_count") return submitCount(db, client, actor, input2);
+    if (operation === "adjust") {
+      const delta = parseQuantity(input2.quantityDelta, { label: "The adjustment", nonZero: true });
+      const reason = text2(input2.reason, "Reason");
+      const part = parsePartRef(input2.partId);
+      const policy = await settings(client, true);
+      void policy;
+      const idrows = part.kind === "id" ? await client.query("SELECT id FROM parts WHERE id=$1", [part.id]) : await client.query("SELECT id FROM parts WHERE vendor=$1 AND lower(vendor_part_number)=lower($2)", [part.vendor, part.vendorPartNumber]);
+      let id = idrows.rows[0]?.id;
+      if (!id && part.kind === "vendor") {
+        await client.query("INSERT INTO parts(vendor,vendor_part_number) VALUES($1,$2) ON CONFLICT DO NOTHING", [part.vendor, part.vendorPartNumber]);
+        id = (await client.query("SELECT id FROM parts WHERE vendor=$1 AND lower(vendor_part_number)=lower($2)", [part.vendor, part.vendorPartNumber])).rows[0]?.id;
+      }
+      if (!id) throw new InputError("Part was not found.");
+      const key = input2.reference ? `adjust:${id}:${text2(input2.reference, "Reference")}` : `adjust:${randomUUID()}`;
+      const previous = await client.query("SELECT * FROM physical_counts WHERE submission_key=$1", [key]);
+      if (previous.rows[0]) {
+        const payload = previous.rows[0].payload;
+        if (Number((payload.lines[0].counted - payload.lines[0].expected).toFixed(4)) !== delta || payload.reason !== reason) throw new InputError("Reference was already used with a different adjustment.");
+        return { countId: previous.rows[0].id, status: previous.rows[0].status, duplicate: true };
+      }
+      await lockParts(client, [id]);
+      const snap = await snapshot(client, id);
+      return submitCount(db, client, actor, { submissionKey: key, reason, lines: [{ ...snap, counted: Number((snap.expected + delta).toFixed(4)) }] }, true);
+    }
+    if (operation === "approve_count" || operation === "reject_count") {
+      const current = await settings(client, true);
+      const id = uuid3(input2.countId, "Count ID");
+      const reason = text2(input2.reason, "Decision reason");
+      const result = await client.query("SELECT * FROM physical_counts WHERE id=$1 FOR UPDATE", [id]);
+      const count = result.rows[0];
+      if (!count) throw new InputError("Count was not found.");
+      approver(actor, current.settings, operation === "approve_count" ? count.submitted_by : void 0);
+      approver(actor, count.policy_snapshot, operation === "approve_count" ? count.submitted_by : void 0);
+      if (count.status !== "pending") {
+        if (count.status === (operation === "approve_count" ? "applied" : "rejected")) return { countId: id, status: count.status, duplicate: true };
+        throw new InputError("Count already has a final decision.");
+      }
+      if (operation === "reject_count") {
+        await client.query("UPDATE physical_counts SET status='rejected',decided_by=$2::jsonb,decided_at=now(),decision_reason=$3 WHERE id=$1", [id, json2(actor), reason]);
+        return { countId: id, status: "rejected", duplicate: false };
+      }
+      if (String(count.settings_revision) !== current.revision) throw new InputError("Approval policy changed. Reject this submission and preview a new count.");
+      return applyCount(db, client, count, actor, reason);
+    }
+    if (operation === "preview_receipt") {
+      const orderId = uuid3(input2.orderId, "Order ID");
+      const shipment = text2(input2.shipmentReference, "Shipment reference");
+      if (!Array.isArray(input2.lines) || !input2.lines.length || input2.lines.length > 200) throw new InputError("Receiving requires 1\u2013200 lines.");
+      const requested = input2.lines.map((v) => {
+        const l = object2(v);
+        return { partId: uuid3(l.partId, "Part ID"), quantity: parseQuantity(l.quantity, { label: "Receipt quantity", positive: true }) };
+      });
+      if (new Set(requested.map((l) => l.partId)).size !== requested.length) throw new InputError("A part may appear only once per shipment.");
+      await lockParts(client, requested.map((l) => l.partId));
+      const state = await orderRows(client, orderId);
+      const lines = requested.map((l) => {
+        const old2 = state.lines.find((x) => x.partId === l.partId);
+        if (!old2) throw new InputError("Receipt line does not belong to the order.");
+        return { ...old2, quantity: l.quantity, overage: Math.max(0, l.quantity - old2.outstanding) };
+      });
+      const reason = typeof input2.reason === "string" ? input2.reason.trim() : "";
+      if (lines.some((l) => l.overage > 0) && !reason) throw new InputError("Overages require a reason.");
+      if (reason) text2(reason, "Reason");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`receipt:${orderId}:${shipment}`]);
+      const old = await client.query("SELECT * FROM receipt_previews WHERE order_id=$1 AND shipment_reference=$2 FOR UPDATE", [orderId, shipment]);
+      if (old.rows[0]?.applied_at) {
+        if (json2(old.rows[0].lines.map((l) => [l.partId, l.quantity]).sort()) !== json2(lines.map((l) => [l.partId, l.quantity]).sort())) throw new InputError("Shipment reference was already used for different quantities.");
+        return { previewId: old.rows[0].id, lines: old.rows[0].lines, duplicate: true, applied: true };
+      }
+      const r = await client.query(`INSERT INTO receipt_previews(order_id,shipment_reference,reason,actor,lines) VALUES($1,$2,$3,$4::jsonb,$5::jsonb)
+     ON CONFLICT(order_id,shipment_reference) DO UPDATE SET id=gen_random_uuid(),reason=excluded.reason,actor=excluded.actor,lines=excluded.lines,created_at=now() RETURNING id`, [orderId, shipment, reason, json2(actor), json2(lines)]);
+      return { previewId: r.rows[0].id, lines, shipmentReference: shipment, reason, duplicate: false };
+    }
+    if (operation === "confirm_receipt") {
+      const id = uuid3(input2.previewId, "Receipt preview ID");
+      const r = await client.query("SELECT * FROM receipt_previews WHERE id=$1 FOR UPDATE", [id]);
+      const preview = r.rows[0];
+      if (!preview) throw new InputError("Receipt preview was not found.");
+      if (preview.applied_at) return { previewId: id, duplicate: true };
+      const lines = preview.lines;
+      await lockParts(client, lines.map((l) => l.partId));
+      const current = await orderRows(client, preview.order_id);
+      for (const l of lines) {
+        const state = current.lines.find((x) => x.partId === l.partId);
+        if (!state || state.ledgerRevision !== l.ledgerRevision || state.outstanding !== l.outstanding) throw new InputError("Stale receiving preview. Preview this shipment again.");
+      }
+      for (const l of lines) {
+        const entry = await appendEntry(db, { part: { kind: "id", id: l.partId }, entryType: "receipt", quantity: l.quantity, reference: current.order.vendor_order_number, idempotencyScope: ["native-receipt", id], unitCost: Number(l.unitCost), note: preview.reason || "Shipment received", createdBy: actor.id, provenance: { source: "native_receipt", companyId: actor.companyId, previewId: id, shipmentReference: preview.shipment_reference, orderId: preview.order_id, submittedBy: preview.actor, confirmedBy: actor, reason: preview.reason } }, client);
+        await client.query("INSERT INTO receipt_history(preview_id,part_id,ledger_entry_id,quantity) VALUES($1,$2,$3,$4)", [id, l.partId, entry.entry.id, l.quantity]);
+      }
+      await client.query("UPDATE receipt_previews SET applied_at=now(),applied_by=$2::jsonb WHERE id=$1", [id, json2(actor)]);
+      return { previewId: id, duplicate: false, received: true };
+    }
+    if (operation === "short_close") {
+      human(actor);
+      const orderId = uuid3(input2.orderId, "Order ID"), partId = uuid3(input2.partId, "Part ID"), reason = text2(input2.reason, "Reason"), key = text2(input2.submissionKey, "Submission key");
+      await lockParts(client, [partId]);
+      const previous = await client.query("SELECT * FROM order_short_closes WHERE submission_key=$1", [key]);
+      if (previous.rows[0]) {
+        if (previous.rows[0].order_id !== orderId || previous.rows[0].part_id !== partId || previous.rows[0].reason !== reason) throw new InputError("Submission key was already used for a different short-close.");
+        return { shortCloseId: previous.rows[0].id, duplicate: true };
+      }
+      const current = await orderRows(client, orderId);
+      const line = current.lines.find((l) => l.partId === partId);
+      if (!line) throw new InputError("Order line was not found.");
+      if (line.ledgerRevision !== String(input2.ledgerRevision) || line.outstanding !== quantity(input2.outstanding, "Outstanding")) throw new InputError("Stale order snapshot. Reload before short-close.");
+      if (line.outstanding <= 0) throw new InputError("No outstanding quantity to close.");
+      const r = await client.query("INSERT INTO order_short_closes(submission_key,order_id,part_id,quantity,reason,actor) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING id", [key, orderId, partId, line.outstanding, reason, json2(actor)]);
+      await audit(client, actor, operation, orderId, line, { closed: line.outstanding }, reason);
+      return { shortCloseId: r.rows[0].id, closed: line.outstanding };
+    }
+    throw new InputError("Unknown inventory operation.");
+  });
+}
+async function readNative(db, page2, input2) {
+  return db.transaction(async (client) => {
+    if (page2 === "settings") {
+      const current = await settings(client);
+      const history = await client.query("SELECT * FROM operational_audit WHERE target='settings' ORDER BY id DESC LIMIT 100");
+      return { ...current, history: history.rows };
+    }
+    if (page2 === "inventory") {
+      const search = typeof input2.search === "string" ? input2.search.slice(0, 200) : "";
+      const vendor = typeof input2.vendor === "string" ? input2.vendor : null;
+      if (input2.active !== void 0 && !["all", "true", "false"].includes(String(input2.active))) throw new InputError("Unknown active filter.");
+      const rows = await client.query(`SELECT s.*,s.part_id AS "partId",p.reorder_point AS "reorderPoint",p.target_quantity AS "targetQuantity",p.storage_location AS location,p.notes,p.active,p.metadata_revision::text AS revision,
+    costs.last_cost AS "lastCost",costs.average_cost AS "averageCost",costs.last_ordered AS "lastOrdered",
+    COALESCE((SELECT max(e.id) FROM ledger_entries e WHERE e.part_id=p.id),0)::text AS "ledgerRevision"
+    FROM part_stock s JOIN parts p ON p.id=s.part_id LEFT JOIN LATERAL (
+    SELECT (array_agg(unit_cost ORDER BY created_at DESC,id DESC) FILTER(WHERE unit_cost IS NOT NULL))[1] AS last_cost,
+    sum(unit_cost*quantity_delta) FILTER(WHERE entry_type='purchase')/NULLIF(sum(quantity_delta) FILTER(WHERE entry_type='purchase' AND unit_cost IS NOT NULL),0) AS average_cost,
+    max(created_at) FILTER(WHERE entry_type='purchase') AS last_ordered FROM ledger_entries WHERE part_id=p.id) costs ON true
+    WHERE (p.description ILIKE '%'||$1||'%' OR p.vendor_part_number ILIKE '%'||$1||'%' OR p.vendor ILIKE '%'||$1||'%' OR p.storage_location ILIKE '%'||$1||'%')
+    AND ($2::text IS NULL OR p.vendor=$2) AND ($3::text IS NULL OR p.active=($3='true')) AND (NOT $4::boolean OR s.available<=p.reorder_point)
+    ORDER BY p.vendor,p.vendor_part_number LIMIT 1000`, [search, vendor, input2.active === void 0 || input2.active === "all" ? null : String(input2.active), input2.lowStock === true]);
+      return { parts: rows.rows };
+    }
+    if (page2 === "counts" || page2 === "review") {
+      const counts = await client.query(`SELECT c.*,COALESCE((SELECT jsonb_agg(to_jsonb(l)||jsonb_build_object('vendor',p.vendor,'vendorPartNumber',p.vendor_part_number) ORDER BY l.part_id) FROM physical_count_lines l JOIN parts p ON p.id=l.part_id WHERE l.count_id=c.id),'[]'::jsonb) AS lines FROM physical_counts c ORDER BY submitted_at DESC LIMIT 200`);
+      if (page2 === "counts") return { counts: counts.rows };
+      const review = await client.query(`SELECT r.*,(SELECT provenance FROM email_intake i WHERE i.review_id=r.id LIMIT 1) AS intake_provenance FROM review_queue r ORDER BY created_at DESC LIMIT 200`);
+      return { counts: counts.rows, items: review.rows };
+    }
+    if (page2 === "receiving") {
+      const orders = await client.query("SELECT id,vendor,vendor_order_number,order_date,status FROM orders ORDER BY created_at DESC LIMIT 200");
+      const details = input2.orderId ? await orderRows(client, uuid3(input2.orderId, "Order ID")) : void 0;
+      const history = await client.query(`SELECT r.*,COALESCE((SELECT jsonb_agg(h) FROM receipt_history h WHERE h.preview_id=r.id),'[]'::jsonb) AS receipts FROM receipt_previews r WHERE r.applied_at IS NOT NULL ORDER BY r.applied_at DESC LIMIT 100`);
+      const closed = await client.query("SELECT * FROM order_short_closes ORDER BY created_at DESC LIMIT 100");
+      return { orders: orders.rows, ...details, history: history.rows, shortCloses: closed.rows };
+    }
+    if (page2 === "history") {
+      const id = uuid3(input2.partId, "Part ID");
+      const entries2 = await client.query("SELECT * FROM ledger_entries WHERE part_id=$1 ORDER BY id DESC LIMIT 500", [id]);
+      const audit2 = await client.query("SELECT * FROM operational_audit WHERE target=$1 ORDER BY id DESC LIMIT 100", [id]);
+      return { entries: entries2.rows, audit: audit2.rows };
+    }
+    if (page2 === "dashboard") {
+      const r = await client.query(`SELECT (SELECT count(*) FROM part_stock s JOIN parts p ON p.id=s.part_id WHERE p.active AND s.available<=p.reorder_point)::int AS "lowStock",(SELECT count(*) FROM physical_counts WHERE status='pending')::int AS "pendingCounts",(SELECT count(*) FROM review_queue WHERE status='open')::int AS "pendingReviews",(SELECT count(*) FROM part_stock WHERE on_hand<0)::int AS "negativeStock"`);
+      return r.rows[0];
+    }
+    throw new InputError("Unknown inventory page.");
+  });
+}
+
+// src/intake.ts
+init_errors();
+init_ledger();
+init_parts();
+init_config();
+init_storage();
+
 // src/parsers/table.ts
 init_errors();
 function parseTable(raw) {
@@ -43610,8 +43850,8 @@ function partLink(raw) {
   return matched ? { vendorPartNumber: matched[2], description: matched[1].trim() } : void 0;
 }
 function describe3(description, packSize) {
-  const text5 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
-  return text5 ? text5 : void 0;
+  const text4 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
+  return text4 ? text4 : void 0;
 }
 function merchandise(raw) {
   const matched = /^\|(?:\s*\|)*\s*Merchandise\s*\|\s*(\$?[\d,]+\.\d{2,4})\s*\|$/mi.exec(raw);
@@ -43636,10 +43876,10 @@ function parseConfirmation(raw) {
     if (!cell || cell.length !== 5 || !/^\d+$/.test(cell[0])) continue;
     const part = partLink(cell[1]);
     if (!part) continue;
-    const { quantity: quantity2, packSize } = ordered(cell[2]);
+    const { quantity: quantity3, packSize } = ordered(cell[2]);
     lines.push({
       vendorPartNumber: part.vendorPartNumber,
-      quantity: quantity2,
+      quantity: quantity3,
       unitPrice: unitPrice(cell[3]),
       lineTotal: amount(cell[4], "line total"),
       ...describe3(part.description, packSize) ? { description: describe3(part.description, packSize) } : {}
@@ -43657,12 +43897,12 @@ function parseReceipt(raw, header) {
     if (!cell || cell.length !== 8 || !/^\d+$/.test(cell[0])) continue;
     const part = partLink(cell[1]);
     if (!part) continue;
-    const { quantity: quantity2, packSize } = ordered(cell[3]);
+    const { quantity: quantity3, packSize } = ordered(cell[3]);
     const stated = /\bpacks?\s+of\s+\d+\b/i.test(cell[2]);
     const described = describe3(cell[2], stated ? void 0 : packSize);
     lines.push({
       vendorPartNumber: part.vendorPartNumber,
-      quantity: quantity2,
+      quantity: quantity3,
       unitPrice: unitPrice(cell[6]),
       lineTotal: amount(cell[7], "line total"),
       ...described ? { description: described } : {}
@@ -43715,7 +43955,11 @@ function selectParser(raw, vendor, enabled, registry2 = parsers) {
 
 // src/intake.ts
 function provenance(run, source) {
-  return { source, agentId: run.agentId, runId: run.runId, companyId: run.companyId, projectId: run.projectId };
+  return { source, actorType: run.userId ? "user" : "agent", userId: run.userId, agentId: run.agentId, runId: run.runId, companyId: run.companyId, projectId: run.projectId };
+}
+async function enabledVendors(db) {
+  const settings2 = await readNative(db, "settings", {});
+  return parseEnabledVendors(settings2.settings.enabledVendors);
 }
 function independent(input2, agent) {
   try {
@@ -43765,7 +44009,7 @@ async function recordOrder(db, client, vendor, order, messageId, rawText, run, r
       reference: order.orderNumber,
       idempotencyScope: ["purchase", orderId, String(number4)],
       provenance: { ...provenance(run, reviewItemId ? "resolve_review_item" : "submit_order_email"), messageId, rawText, orderId, line: number4, ...reviewItemId ? { reviewItemId } : {} },
-      createdBy: run.agentId,
+      createdBy: run.userId ?? run.agentId,
       createMissingPart: true,
       description: line.description
     }, client);
@@ -43780,7 +44024,8 @@ async function submitOrderEmail(ctx, raw, run) {
   text2(input2.rawText, "Raw email", 1e6);
   const rawText = input2.rawText;
   const vendorHint = input2.vendor === void 0 ? void 0 : vendorKey(input2.vendor);
-  const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+  const db = await openStore(ctx, run.companyId);
+  const enabled = await enabledVendors(db);
   const parser = selectParser(rawText, vendorHint, enabled);
   const vendor = parser?.vendor ?? vendorHint ?? "unknown";
   let agent;
@@ -43810,7 +44055,6 @@ async function submitOrderEmail(ctx, raw, run) {
     if (!vendorHint) reasons.push("Vendor must be specified when no parser identifies the email");
     if (vendorHint && !enabled.includes(vendorHint) && ["mcmaster", "sendcutsend"].includes(vendorHint)) reasons.push("Vendor parser is disabled in company configuration");
   }
-  const db = await openStore(ctx, run.companyId);
   const result = await db.transaction(async (client) => {
     await lock(client, JSON.stringify(["message", messageId]));
     const existing = await disposition(client, messageId);
@@ -43850,13 +44094,17 @@ async function listReviewQueue(ctx, raw, run) {
   return { content: `${items.length} email(s) awaiting review.`, data: { items, count: items.length } };
 }
 async function resolveReviewItem(ctx, raw, run) {
-  const input2 = object2(raw);
+  const db = await openStore(ctx, run.companyId);
+  const data = await resolveReviewDomain(ctx, db, object2(raw), { type: "agent", id: run.agentId, companyId: run.companyId }, run);
+  return { content: `Review item ${data.status}.`, data };
+}
+async function resolveReviewDomain(ctx, db, input2, actor, source) {
+  const run = source ?? { companyId: actor.companyId, ...actor.type === "user" ? { userId: actor.id } : { agentId: actor.id } };
   const id = text2(input2.reviewItemId, "Review item id");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new InputError("Review item id must be a UUID.");
   const resolution = text2(input2.resolution, "Resolution");
   if (!["accept", "accept_with_corrections", "reject"].includes(resolution)) throw new InputError("Unknown review resolution.");
   const note = text2(input2.note, "Resolution note");
-  const db = await openStore(ctx, run.companyId);
   const result = await db.transaction(async (client) => {
     const rows = await client.query("SELECT * FROM review_queue WHERE id=$1 FOR UPDATE", [id]);
     const item = rows.rows[0];
@@ -43874,7 +44122,7 @@ async function resolveReviewItem(ctx, raw, run) {
         const saved = extraction(item.parser_extraction);
         reasons.push(...reconcile(saved), ...disagreements(selected, saved));
       }
-      const enabled = parseEnabledVendors((await ctx.config.get(run.companyId)).enabledVendors);
+      const enabled = await enabledVendors(db);
       const parser = selectParser(item.raw_email, item.vendor, enabled);
       if (!parser || !item.parser_extraction) reasons.push(...independent(input2, selected).reasons);
       if (item.vendor === "unknown") reasons.push("Reject and resubmit with an explicit vendor");
@@ -43885,10 +44133,10 @@ async function resolveReviewItem(ctx, raw, run) {
     }
     const status = resolution === "reject" ? "rejected" : resolution === "accept" ? "accepted" : "accepted_with_corrections";
     await client.query(`UPDATE review_queue SET status=$2,resolution_note=$3,resolved_at=now(),resolved_by=$4,
-      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, run.agentId, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, "resolve_review_item"), independentExtraction: input2.independentExtraction, agentModel: input2.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
+      resolution_extraction=$5::jsonb,resolution_provenance=$6::jsonb,resolved_order_id=$7 WHERE id=$1`, [id, status, note, actor.id, JSON.stringify(selected ?? null), JSON.stringify({ ...provenance(run, "resolve_review_item"), independentExtraction: input2.independentExtraction, agentModel: input2.agentModel, parserDisagreements: selected && item.parser_extraction ? disagreements(extraction(item.parser_extraction), selected) : [] }), orderId ?? null]);
     return { reviewItemId: id, status, orderId, duplicate: false };
   });
-  return { content: `Review item ${result.status}.`, data: result };
+  return result;
 }
 
 // src/bridge.ts
@@ -43932,11 +44180,11 @@ function indexProducts(products) {
     for (const option of raw.options ?? []) {
       const name = option.display_name;
       if (typeof name !== "string" || name === "") continue;
-      const values2 = options.get(name) ?? /* @__PURE__ */ new Set();
+      const values = options.get(name) ?? /* @__PURE__ */ new Set();
       for (const value of option.option_values ?? []) {
-        if (typeof value.label === "string" && value.label !== "") values2.add(value.label);
+        if (typeof value.label === "string" && value.label !== "") values.add(value.label);
       }
-      options.set(name, values2);
+      options.set(name, values);
     }
     const product = { productId: raw.id, name: raw.name ?? "", options };
     byProductKey.set(`product-${raw.id}`, product);
@@ -43954,15 +44202,15 @@ function indexProducts(products) {
     }
   };
 }
-async function readCatalog(ctx, companyId, settings) {
-  const token = await ctx.secrets.resolve(settings.token, {
+async function readCatalog(ctx, companyId, settings2) {
+  const token = await ctx.secrets.resolve(settings2.token, {
     companyId,
     configPath: CONFIG_KEYS.bigcommerceToken
   });
   if (!token) throw new ConfigError("The configured BigCommerce token secret resolved to an empty value.");
   const products = [];
   for (let page2 = 1; page2 <= MAX_PAGES; page2++) {
-    const url2 = `https://api.bigcommerce.com/stores/${settings.storeHash}/v3/catalog/products?include=variants,options&limit=${PAGE_SIZE}&page=${page2}`;
+    const url2 = `https://api.bigcommerce.com/stores/${settings2.storeHash}/v3/catalog/products?include=variants,options&limit=${PAGE_SIZE}&page=${page2}`;
     const response = await fetch(url2, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
       headers: { "X-Auth-Token": token, Accept: "application/json" }
@@ -43992,7 +44240,7 @@ var BridgeApiError = class extends OperatorFacingError {
 };
 async function bigcommerceClient(ctx, companyId) {
   const config2 = await ctx.config.get(companyId);
-  const settings = parseCatalogSettings(config2);
+  const settings2 = parseCatalogSettings(config2);
   const binding = config2.bigcommerceBridgeToken;
   if (!isSecretRefBinding(binding))
     throw new ConfigError(
@@ -44003,7 +44251,7 @@ async function bigcommerceClient(ctx, companyId) {
     configPath: "bigcommerceBridgeToken"
   });
   if (!token) throw new ConfigError("BigCommerce bridge token is empty.");
-  const base = `https://api.bigcommerce.com/stores/${settings.storeHash}`;
+  const base = `https://api.bigcommerce.com/stores/${settings2.storeHash}`;
   async function request(path4, method = "GET", body) {
     const response = await fetch(base + path4, {
       method,
@@ -44088,7 +44336,7 @@ async function bigcommerceClient(ctx, companyId) {
       }
       return { snapshots, orderIds: orders.map((o) => String(o.id)) };
     },
-    async push(key, quantity2) {
+    async push(key, quantity3) {
       if (/^product-[0-9]+$/.test(key)) {
         const id = key.slice(8);
         const result = await request(`/v3/catalog/products/${id}`);
@@ -44097,7 +44345,7 @@ async function bigcommerceClient(ctx, companyId) {
             `Catalog key ${key} requires product inventory tracking before stock can be pushed.`
           );
         await request(`/v3/catalog/products/${id}`, "PUT", {
-          inventory_level: quantity2
+          inventory_level: quantity3
         });
       } else {
         const variants = await pages(
@@ -44118,7 +44366,7 @@ async function bigcommerceClient(ctx, companyId) {
         await request(
           `/v3/catalog/products/${v.product_id}/variants/${v.id}`,
           "PUT",
-          { inventory_level: quantity2 }
+          { inventory_level: quantity3 }
         );
       }
     }
@@ -44147,7 +44395,7 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
       [input2.orderId, input2.lineId]
     );
     const prior = found.rows[0];
-    const snapshot = {
+    const snapshot2 = {
       ...input2,
       options: canonicalOptions(input2.options),
       observedAt: new Date(input2.observedAt).toISOString()
@@ -44209,7 +44457,7 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
       const parts = /* @__PURE__ */ new Map();
       for (const line of chosen.lines)
         parts.set(line.part, round((parts.get(line.part) ?? 0) + line.qty));
-      expansion = [...parts].sort(([a], [b]) => a.localeCompare(b)).map(([part, quantity2]) => ({ part, quantity: quantity2 }));
+      expansion = [...parts].sort(([a], [b]) => a.localeCompare(b)).map(([part, quantity3]) => ({ part, quantity: quantity3 }));
       bomId = active.bomId;
     }
     const closed = input2.cancelled || input2.refunded === input2.ordered;
@@ -44226,6 +44474,7 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
         reversed,
         bomId
       };
+    await client.query("SELECT singleton FROM operational_settings WHERE singleton=true FOR UPDATE");
     const resolved = await client.query(
       `SELECT id,vendor,vendor_part_number FROM parts ORDER BY id FOR UPDATE`
     );
@@ -44235,6 +44484,23 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
         p.id
       ])
     );
+    const credit = reversed - Number(prior?.reversed ?? 0);
+    if (credit > 0) {
+      const deltas = expansion.map((part) => {
+        const partId = ids.get(part.part.toLowerCase());
+        if (!partId) throw new InputError("Pinned BOM part no longer exists.");
+        return { partId, quantity: round(credit * part.quantity) };
+      });
+      const adjustment = await submitAdjustmentBatch(
+        db,
+        client,
+        { type: "agent", id: run.agentId, companyId: run.companyId },
+        deltas,
+        JSON.stringify(["bc-refund", input2.orderId, input2.lineId, reversed]),
+        `BigCommerce refund ${input2.orderId}/${input2.lineId}: ${reversed} returned units; BOM ${bomId}`
+      );
+      if (adjustment.status !== "applied") return { pendingApproval: true, ...adjustment };
+    }
     for (const part of expansion) {
       const id = ids.get(part.part.toLowerCase());
       if (!id) throw new InputError("Pinned BOM part no longer exists.");
@@ -44246,26 +44512,6 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
         bomId,
         observedAt: input2.observedAt
       };
-      const credit = reversed - Number(prior?.reversed ?? 0);
-      if (credit > 0)
-        await appendEntry(
-          db,
-          {
-            part: parsePartRef(part.part),
-            entryType: "adjustment",
-            quantity: round(credit * part.quantity),
-            reference: JSON.stringify([
-              input2.orderId,
-              input2.lineId,
-              "refund",
-              reversed
-            ]),
-            idempotencyScope: ["bc-refund"],
-            provenance: provenance2,
-            createdBy: run.agentId
-          },
-          client
-        );
       const consumed = input2.shipped - Number(prior?.shipped ?? 0);
       if (consumed > 0)
         await appendEntry(
@@ -44317,7 +44563,7 @@ async function applyOrderLine(db, input2, run, dryRun = false) {
         reversed,
         closed,
         input2.observedAt,
-        JSON.stringify(snapshot)
+        JSON.stringify(snapshot2)
       ]
     );
     return { committed, shipped: input2.shipped, reversed, bomId };
@@ -44335,15 +44581,15 @@ async function sellableInTransaction(client, key, options) {
     for (const name of new Set(
       active.bom.optionScopes.map((s) => s.optionName)
     )) {
-      const values2 = active.bom.optionScopes.filter(
+      const values = active.bom.optionScopes.filter(
         (s) => s.optionName === name
       );
-      if (selections.length * values2.length > 1e3)
+      if (selections.length * values.length > 1e3)
         throw new InputError(
           "Too many BOM option combinations; query explicit options."
         );
       selections = selections.flatMap(
-        (s) => values2.map((v) => [...s, { option: name, value: v.optionValue }])
+        (s) => values.map((v) => [...s, { option: name, value: v.optionValue }])
       );
     }
     if (options) selections = [options];
@@ -44403,7 +44649,7 @@ async function getSellable(ctx, params2, run) {
 async function pushStock(ctx, run) {
   const db = await openStore(ctx, run.companyId);
   const api = await bigcommerceClient(ctx, run.companyId);
-  return flushStock(db, (key, quantity2) => api.push(key, quantity2));
+  return flushStock(db, (key, quantity3) => api.push(key, quantity3));
 }
 async function flushStock(db, push) {
   return db.transaction(async (client) => {
@@ -44450,15 +44696,16 @@ async function reconcileBigcommerce(ctx, params2, run) {
       "A previously reconciled physical order line disappeared; resolve it explicitly. Cursor unchanged."
     );
   const results = [];
-  for (const snapshot of snapshots)
-    results.push(await applyOrderLine(db, snapshot, run, p.dryRun === true));
+  for (const snapshot2 of snapshots)
+    results.push(await applyOrderLine(db, snapshot2, run, p.dryRun === true));
   if (p.dryRun)
     return {
       content: `Previewed ${results.length} order lines; nothing changed.`,
       data: { results, dryRun: true }
     };
   const stock = await pushStock(ctx, run);
-  await db.transaction(async (c) => {
+  const pendingApproval = results.some((result) => "pendingApproval" in result && result.pendingApproval);
+  if (!pendingApproval) await db.transaction(async (c) => {
     await c.query(
       `INSERT INTO sync_state(key,cursor) VALUES('bigcommerce',$1)
     ON CONFLICT(key) DO UPDATE SET cursor=GREATEST(sync_state.cursor,EXCLUDED.cursor),updated_at=now()`,
@@ -44467,7 +44714,205 @@ async function reconcileBigcommerce(ctx, params2, run) {
   });
   return {
     content: `Reconciled ${results.length} order lines.`,
-    data: { results, ...stock, cursor: started }
+    data: { results, ...stock, pendingApproval, cursor: pendingApproval ? since ?? null : started }
+  };
+}
+
+// src/native.ts
+function companyScope(value) {
+  return text2(value, "Host-authorized company", 200);
+}
+function actionActor(context) {
+  const actor = context?.actor;
+  if (!actor || actor.companyId !== context.companyId) throw new InputError("Authenticated company context is required.");
+  const companyId = companyScope(actor.companyId);
+  if (actor.type === "user") return { type: "user", id: text2(actor.userId, "Authenticated human identity", 200), companyId };
+  if (actor.type === "agent") return { type: "agent", id: text2(actor.agentId, "Authenticated agent identity", 200), companyId };
+  throw new InputError("An authenticated user or agent is required.");
+}
+function toolActor(run) {
+  return { type: "agent", id: text2(run.agentId, "Authenticated agent identity", 200), companyId: companyScope(run.companyId) };
+}
+async function nativeAction(ctx, actor, raw) {
+  const input2 = object2(raw);
+  const operation = text2(input2.operation, "Operation");
+  const db = await openStore(ctx, actor.companyId);
+  const result = operation === "resolve_review" ? await resolveReviewDomain(ctx, db, input2, actor) : await executeNative(db, actor, operation, input2);
+  if (["submit_count", "approve_count", "confirm_receipt", "resolve_review", "adjust"].includes(operation)) {
+    const run = { companyId: actor.companyId, agentId: actor.type === "agent" ? actor.id : void 0, runId: void 0 };
+    try {
+      return { ...object2(result), stockSync: await pushStock(ctx, run) };
+    } catch {
+      return { ...object2(result), stockSync: { pending: true, message: "Saved; stock push pending. Run reconcile_bigcommerce to retry." } };
+    }
+  }
+  return result;
+}
+function registerNative(ctx) {
+  ctx.data.register("inventory_page", async (params2) => {
+    const companyId = companyScope(params2.companyId);
+    const db = await openStore(ctx, companyId);
+    return readNative(db, text2(params2.page ?? "inventory", "Page"), params2);
+  });
+  ctx.actions.register("inventory_action", async (params2, context) => {
+    try {
+      return await nativeAction(ctx, actionActor(context), params2);
+    } catch (error62) {
+      if (error62 instanceof OperatorFacingError) throw error62;
+      ctx.logger.warn("Inventory action failed", { reason: error62?.name });
+      throw new InputError("The inventory action failed. Check the plugin log.");
+    }
+  });
+}
+
+// src/handlers.ts
+init_storage();
+var MAX_TEXT2 = 500;
+var CONTROL_CHARACTERS3 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+function params(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new InputError("Tool parameters must be an object.");
+  }
+  return value;
+}
+function optionalText(value, label2) {
+  if (value === void 0 || value === null || value === "") return void 0;
+  if (typeof value !== "string") throw new InputError(`${label2} must be text.`);
+  const trimmed = value.trim();
+  if (trimmed === "") return void 0;
+  if (trimmed.length > MAX_TEXT2) {
+    throw new InputError(`${label2} is longer than ${MAX_TEXT2} characters.`);
+  }
+  if (CONTROL_CHARACTERS3.test(trimmed)) {
+    throw new InputError(`${label2} contains control characters.`);
+  }
+  return trimmed;
+}
+function requiredText(value, label2) {
+  const text4 = optionalText(value, label2);
+  if (text4 === void 0) throw new InputError(`${label2} is required.`);
+  return text4;
+}
+function provenanceOf(tool3, runCtx, extra) {
+  return {
+    ...extra,
+    source: tool3,
+    agentId: runCtx.agentId,
+    runId: runCtx.runId,
+    companyId: runCtx.companyId,
+    projectId: runCtx.projectId
+  };
+}
+function stockSummary(stock) {
+  return `${stock.ref}: ${stock.onHand} on hand, ${stock.onOrder} on order, ${stock.committed} committed.`;
+}
+function entryResult(tool3, result, verb) {
+  const content = result.duplicate ? `Already recorded \u2014 this ${verb} was submitted before, so nothing changed. ${stockSummary(result.stock)}` : `${verb[0].toUpperCase()}${verb.slice(1)} recorded. ${stockSummary(result.stock)}`;
+  return {
+    content,
+    data: {
+      tool: tool3,
+      recorded: !result.duplicate,
+      duplicate: result.duplicate,
+      entryId: result.entry.id,
+      entryType: result.entry.entryType,
+      quantityDelta: result.entry.quantityDelta,
+      partId: result.part.partId,
+      partRef: result.part.ref,
+      stock: {
+        onHand: result.stock.onHand,
+        onOrder: result.stock.onOrder,
+        committed: result.stock.committed,
+        available: result.stock.available
+      }
+    }
+  };
+}
+async function recordReceipt(ctx, rawParams, runCtx) {
+  const input2 = params(rawParams);
+  const part = parsePartRef(input2.partId);
+  const quantity3 = parseQuantity(input2.quantity, { label: "Quantity", positive: true });
+  const reference = requiredText(input2.reference, "A reference");
+  const delivery = optionalText(input2.delivery, "The delivery");
+  const note = optionalText(input2.note, "The note");
+  const db = await openStore(ctx, runCtx.companyId);
+  const result = await appendEntry(db, {
+    part,
+    entryType: "receipt",
+    quantity: quantity3,
+    reference,
+    idempotencyScope: delivery ? ["receipt", delivery] : ["receipt"],
+    note,
+    createMissingPart: part.kind === "vendor",
+    provenance: provenanceOf("record_receipt", runCtx, {
+      reference,
+      ...delivery ? { delivery } : {}
+    }),
+    createdBy: runCtx.agentId
+  });
+  if (result.duplicate && result.entry.quantityDelta !== quantity3) {
+    const which = delivery ? `Delivery "${delivery}" against reference "${reference}"` : `Reference "${reference}"`;
+    throw new InputError(
+      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity3}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`
+    );
+  }
+  return entryResult("record_receipt", result, "receipt");
+}
+async function recordAdjustment(ctx, rawParams, runCtx) {
+  const input2 = params(rawParams);
+  const part = parsePartRef(input2.partId);
+  const quantityDelta = parseQuantity(input2.quantityDelta, {
+    label: "The adjustment",
+    nonZero: true
+  });
+  const reason = requiredText(input2.reason, "A reason");
+  const reference = optionalText(input2.reference, "The reference");
+  const result = await nativeAction(ctx, toolActor(runCtx), {
+    operation: "adjust",
+    partId: input2.partId,
+    quantityDelta,
+    reason,
+    reference
+  });
+  return {
+    content: "Adjustment submitted under the inventory approval policy.",
+    data: { tool: "record_adjustment", ...result }
+  };
+}
+async function getStock(ctx, rawParams, runCtx) {
+  const input2 = params(rawParams);
+  const part = input2.partId === void 0 || input2.partId === null || input2.partId === "" ? void 0 : parsePartRef(input2.partId);
+  const db = await openStore(ctx, runCtx.companyId);
+  const rows = await readStock(db, part);
+  if (part && rows.length === 0) {
+    const ref = part.kind === "id" ? part.id : part.ref;
+    return {
+      content: `No part matches ${ref}. Nothing has been received or adjusted for it.`,
+      data: { parts: [], count: 0, matched: false }
+    };
+  }
+  const matched = part ? { matched: true } : {};
+  const content = part ? stockSummary(rows[0]) : rows.length === 0 ? "No parts yet. Nothing has been received or adjusted." : `${rows.length} part${rows.length === 1 ? "" : "s"}:
+${rows.map(stockSummary).join("\n")}`;
+  return {
+    content,
+    data: {
+      ...matched,
+      count: rows.length,
+      parts: rows.map((row) => ({
+        partId: row.partId,
+        partRef: row.ref,
+        vendor: row.vendor,
+        vendorPartNumber: row.vendorPartNumber,
+        description: row.description,
+        unitOfMeasure: row.unitOfMeasure,
+        onHand: row.onHand,
+        onOrder: row.onOrder,
+        committed: row.committed,
+        available: row.available,
+        lastEntryAt: row.lastEntryAt ? row.lastEntryAt.toISOString() : null
+      }))
+    }
   };
 }
 
@@ -44509,13 +44954,13 @@ function parseConfigRepoSettings(config2) {
     ...typeof branch === "string" && branch !== "" ? { branch } : {}
   };
 }
-async function githubConfigRepo(ctx, companyId, settings) {
-  const token = await ctx.secrets.resolve(settings.token, {
+async function githubConfigRepo(ctx, companyId, settings2) {
+  const token = await ctx.secrets.resolve(settings2.token, {
     companyId,
     configPath: CONFIG_KEYS.configRepoToken
   });
   if (!token) throw new ConfigError("The configured GitHub token secret resolved to an empty value.");
-  const base = `https://api.github.com/repos/${settings.repo}`;
+  const base = `https://api.github.com/repos/${settings2.repo}`;
   const request = async (url2, accept) => {
     const response = await fetch(url2, {
       signal: AbortSignal.timeout(TIMEOUT_MS2),
@@ -44528,31 +44973,31 @@ async function githubConfigRepo(ctx, companyId, settings) {
     });
     if (!response.ok) {
       throw new ConfigRepoError(
-        `GitHub refused to read ${settings.repo} (HTTP ${response.status}). Check that the token in ${SETTINGS_PATH} is current and has read access to that repository, then run sync_boms again.`
+        `GitHub refused to read ${settings2.repo} (HTTP ${response.status}). Check that the token in ${SETTINGS_PATH} is current and has read access to that repository, then run sync_boms again.`
       );
     }
     return response;
   };
-  const json2 = async (path4) => await (await request(`${base}${path4}`, "application/vnd.github+json")).json();
+  const json3 = async (path4) => await (await request(`${base}${path4}`, "application/vnd.github+json")).json();
   return {
-    repo: settings.repo,
+    repo: settings2.repo,
     async headCommit() {
-      const branch = settings.branch ?? (await json2("")).default_branch;
+      const branch = settings2.branch ?? (await json3("")).default_branch;
       if (!branch || !REF.test(branch)) {
-        throw new ConfigRepoError(`${settings.repo} did not report a usable default branch.`);
+        throw new ConfigRepoError(`${settings2.repo} did not report a usable default branch.`);
       }
-      const commit = await json2(`/commits/${encodeURIComponent(branch)}`);
+      const commit = await json3(`/commits/${encodeURIComponent(branch)}`);
       if (!commit.sha || !/^[0-9a-f]{40}$/.test(commit.sha)) {
-        throw new ConfigRepoError(`${settings.repo} did not report a commit for ${branch}.`);
+        throw new ConfigRepoError(`${settings2.repo} did not report a commit for ${branch}.`);
       }
       return commit.sha;
     },
     async readBoms(commit) {
       if (!REF.test(commit)) throw new ConfigError("That is not a usable commit or branch name.");
       const ref = `?ref=${encodeURIComponent(commit)}`;
-      const listing = await json2(`/contents/bom${ref}`);
+      const listing = await json3(`/contents/bom${ref}`);
       if (!Array.isArray(listing)) {
-        throw new ConfigRepoError(`${settings.repo} has no bom/ directory at ${commit}.`);
+        throw new ConfigRepoError(`${settings2.repo} has no bom/ directory at ${commit}.`);
       }
       const files = listing.filter((entry) => entry.type === "file" && /\.ya?ml$/.test(entry.name)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
       if (files.length > MAX_FILES) {
@@ -44575,7 +45020,7 @@ async function githubConfigRepo(ctx, companyId, settings) {
       }
       ctx.logger.info("Read BOM files from the config repository", {
         companyId,
-        repo: settings.repo,
+        repo: settings2.repo,
         commit,
         files: sources.length
       });
@@ -44639,14 +45084,14 @@ function validateAgainstCatalog(boms, catalog) {
     }
     if (bom.status === "draft") continue;
     for (const scope of bom.optionScopes) {
-      const values2 = product.options.get(scope.optionName);
-      if (!values2) {
+      const values = product.options.get(scope.optionName);
+      if (!values) {
         problems.push(
           `${where}: product ${product.productId} has no option named "${scope.optionName}". Its options are ${[...product.options.keys()].map((name) => `"${name}"`).join(", ") || "(none)"}.`
         );
-      } else if (!values2.has(scope.optionValue)) {
+      } else if (!values.has(scope.optionValue)) {
         problems.push(
-          `${where}: option "${scope.optionName}" on product ${product.productId} has no value "${scope.optionValue}". Its values are ${[...values2].map((value) => `"${value}"`).join(", ") || "(none)"}.`
+          `${where}: option "${scope.optionName}" on product ${product.productId} has no value "${scope.optionValue}". Its values are ${[...values].map((value) => `"${value}"`).join(", ") || "(none)"}.`
         );
       }
     }
@@ -44840,312 +45285,7 @@ ${data.warnings.map((warning) => `  - ${warning}`).join("\n")}` : ""}`,
 
 // src/worker.ts
 init_sales();
-
-// src/sheet-sync.ts
-init_errors();
-init_ledger();
-init_quantity();
 init_storage();
-
-// src/sheets-client.ts
-init_config();
-init_errors();
-import { createSign } from "node:crypto";
-var SheetError = class extends OperatorFacingError {
-};
-function parseSheetSettings(config2) {
-  const id = config2.spreadsheetId;
-  if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{10,200}$/.test(id)) {
-    throw new ConfigError("Configure the inventory spreadsheet ID from private settings before running sync_sheet.");
-  }
-  if (!isSecretRefBinding(config2.googleServiceAccount)) {
-    throw new ConfigError("Select a Paperclip secret containing the Google service-account JSON key. Share the spreadsheet with that service account as an editor.");
-  }
-  return { spreadsheetId: id, serviceAccount: config2.googleServiceAccount };
-}
-async function googleSheetsClient(ctx, companyId, settings) {
-  const raw = await ctx.secrets.resolve(settings.serviceAccount, { companyId, configPath: "googleServiceAccount" });
-  let key;
-  try {
-    key = JSON.parse(raw);
-  } catch {
-    throw new ConfigError("The Google service-account secret must contain a JSON key.");
-  }
-  if (!key || typeof key !== "object" || key.type !== "service_account" || typeof key.client_email !== "string" || !key.client_email.includes("@") || typeof key.private_key !== "string") {
-    throw new ConfigError("The Google service-account secret is missing its account identity or private key.");
-  }
-  const now = Math.floor(Date.now() / 1e3);
-  const encode3 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const unsigned = `${encode3({ alg: "RS256", typ: "JWT" })}.${encode3({ iss: key.client_email, scope: "https://www.googleapis.com/auth/spreadsheets", aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600 })}`;
-  let assertion;
-  try {
-    assertion = `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(key.private_key, "base64url")}`;
-  } catch {
-    throw new ConfigError("The Google service-account private key could not sign a request.");
-  }
-  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    signal: AbortSignal.timeout(3e4),
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion })
-  });
-  if (!tokenResponse.ok) throw new SheetError("Google rejected the service-account credentials. Check the Paperclip secret.");
-  const token = await tokenResponse.json();
-  if (!token.access_token) throw new SheetError("Google did not return a service-account access token.");
-  const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}`;
-  const request = async (url2, body) => {
-    const response = await fetch(url2, {
-      method: body ? "POST" : "GET",
-      signal: AbortSignal.timeout(3e4),
-      headers: { Authorization: `Bearer ${token.access_token}`, "Content-Type": "application/json" },
-      ...body ? { body: JSON.stringify(body) } : {}
-    });
-    if (!response.ok) throw new SheetError(`Google Sheets request failed (HTTP ${response.status}). Check sharing, protected-range permissions and API access; rerun sync_sheet safely after fixing it.`);
-    return response.json();
-  };
-  return {
-    email: key.client_email,
-    read: async () => await request(`${base}?includeGridData=true`),
-    batch: async (requests) => {
-      if (requests.length) await request(`${base}:batchUpdate`, { requests });
-    }
-  };
-}
-function writeCells(sheetId, row, column, values2) {
-  return { updateCells: { start: { sheetId, rowIndex: row, columnIndex: column }, fields: "userEnteredValue", rows: values2.map((cells2) => ({ values: cells2.map((value) => ({ userEnteredValue: typeof value === "number" ? { numberValue: value } : typeof value === "boolean" ? { boolValue: value } : { stringValue: value } })) })) } };
-}
-function gridRows(tab) {
-  const rows = [];
-  for (const block of tab.data ?? []) for (const [i, row] of (block.rowData ?? []).entries()) {
-    const index = (block.startRow ?? 0) + i;
-    rows[index] ??= [];
-    for (const [j, cell] of (row.values ?? []).entries()) rows[index][(block.startColumn ?? 0) + j] = cell;
-  }
-  return rows;
-}
-function cellValue(cell) {
-  const value = cell?.effectiveValue ?? cell?.userEnteredValue;
-  if (value && "errorValue" in value) throw new SheetError("A spreadsheet cell contains an error. Fix it before syncing.");
-  return value?.stringValue ?? value?.numberValue ?? value?.boolValue;
-}
-
-// src/sheet-sync.ts
-var INVENTORY_HEADERS = ["Part ID", "Part", "Description", "Unit", "On hand", "Committed", "On order", "Sellable impact", "Last cost", "Avg cost", "Last ordered", "Reorder point", "Target qty", "Location", "Notes", "Active"];
-var ADJUSTMENT_HEADERS = ["Count ID", "Part ID", "Physical count", "Reason", "Counted at", "Counted by", "Processed at", "Result"];
-var REVIEW_HEADERS = ["Review ID", "Vendor", "Message ID", "Reason", "Parser extraction", "Agent extraction", "Created at"];
-var MANAGED = "inventory-plugin:";
-var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function text4(value, label2, max = 500) {
-  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new SheetError(`${label2} must be nonblank text (at most ${max} characters).`);
-  return value.trim();
-}
-function values(row = []) {
-  return row.map(cellValue);
-}
-function populated(row = []) {
-  return row.some((cell) => cellValue(cell) !== void 0 && cellValue(cell) !== "");
-}
-function validateHeader(tab, expected) {
-  const rows = gridRows(tab);
-  if (!rows.some(populated)) return;
-  if (expected.some((label2, i) => cellValue(rows[0]?.[i]) !== label2)) {
-    throw new SheetError(`${tab.properties.title} has unexpected columns. Restore the documented header order; no cells or ledger entries were changed.`);
-  }
-}
-function validateInputCells(row, label2) {
-  if (row.some((cell) => cell?.userEnteredValue?.formulaValue !== void 0)) throw new SheetError(`${label2} contains formulas. Enter literal values before syncing.`);
-}
-function parseCounts(rows) {
-  const counts = [];
-  const ids = /* @__PURE__ */ new Set();
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i] ?? [];
-    if (!populated(row.slice(0, 6))) continue;
-    validateInputCells(row.slice(0, 6), `Adjustments row ${i + 1}`);
-    const cells2 = values(row);
-    const id = text4(cells2[0], `Adjustments row ${i + 1} Count ID`, 100);
-    if (ids.has(id)) throw new SheetError(`Duplicate Count ID in Adjustments row ${i + 1}. Give each physical count a unique ID.`);
-    ids.add(id);
-    const partId = text4(cells2[1], `Adjustments row ${i + 1} Part ID`).toLowerCase();
-    if (!UUID2.test(partId)) throw new SheetError(`Adjustments row ${i + 1} requires the Inventory Part ID.`);
-    const count = parseQuantity(cells2[2], { label: `Adjustments row ${i + 1} physical count` });
-    if (count < 0) throw new SheetError("Physical counts cannot be negative.");
-    const countedAt = text4(cells2[4], `Adjustments row ${i + 1} Counted at`);
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(countedAt) || !Number.isFinite(Date.parse(countedAt))) throw new SheetError(`Adjustments row ${i + 1} Counted at must be an ISO timestamp with a time zone.`);
-    counts.push({ row: i, id, partId, count, reason: text4(cells2[3], `Adjustments row ${i + 1} Count reason`), countedAt, countedBy: text4(cells2[5], `Adjustments row ${i + 1} Counted by`) });
-  }
-  return counts;
-}
-function inventoryCellValue(cell, rowNumber, column) {
-  try {
-    return cellValue(cell);
-  } catch (error62) {
-    if (error62 instanceof SheetError) throw new SheetError(`Inventory row ${rowNumber} ${INVENTORY_HEADERS[column]}: ${error62.message}`);
-    throw error62;
-  }
-}
-function settingsOf(row, rowNumber) {
-  const label2 = `Inventory row ${rowNumber}`;
-  validateInputCells(row.slice(11, 16), `${label2} human settings`);
-  const cells2 = row.slice(11, 16).map((cell, offset) => inventoryCellValue(cell, rowNumber, 11 + offset));
-  const result = {};
-  for (const [offset, name] of ["reorderPoint", "targetQty", "location", "notes", "active"].entries()) {
-    const value = cells2[offset];
-    const field2 = `${label2} ${INVENTORY_HEADERS[11 + offset]}`;
-    if (value === void 0 || value === "") {
-      result[name] = null;
-      continue;
-    }
-    if (offset < 2) {
-      const qty = parseQuantity(value, { label: field2 });
-      if (qty < 0) throw new SheetError(`${field2} cannot be negative.`);
-      result[name] = qty;
-    } else if (offset === 4) {
-      if (typeof value !== "boolean") throw new SheetError(`${field2} must be a checkbox boolean.`);
-      result[name] = value;
-    } else result[name] = text4(value, field2, 5e3);
-  }
-  return result;
-}
-function protect(tab, suffix, range, email3) {
-  const description = MANAGED + suffix;
-  const existing = tab.protectedRanges?.find((p) => p.description === description);
-  const protectedRange = { description, range: { sheetId: tab.properties.sheetId, ...range }, warningOnly: false, editors: { users: [email3], domainUsersCanEdit: false } };
-  return existing ? { updateProtectedRange: { protectedRange: { ...protectedRange, protectedRangeId: existing.protectedRangeId }, fields: "range,description,warningOnly,editors" } } : { addProtectedRange: { protectedRange } };
-}
-function ensureSize(tab, rows, columns) {
-  const grid = tab.properties.gridProperties;
-  if (grid.rowCount >= rows && grid.columnCount >= columns) return [];
-  return [{ updateSheetProperties: { properties: { sheetId: tab.properties.sheetId, gridProperties: { rowCount: Math.max(grid.rowCount, rows), columnCount: Math.max(grid.columnCount, columns) } }, fields: "gridProperties.rowCount,gridProperties.columnCount" } }];
-}
-async function applyCount(db, client, spreadsheetId, count, run, dryRun) {
-  const prior = (await client.query("SELECT * FROM sheet_counts WHERE spreadsheet_id=$1 AND count_id=$2", [spreadsheetId, count.id])).rows[0];
-  if (prior) {
-    if (prior.part_id !== count.partId || toNumber(prior.physical_count) !== count.count || prior.reason !== count.reason || prior.counted_at !== count.countedAt || prior.counted_by !== count.countedBy) throw new SheetError(`Count ID ${count.id} was already processed with different inputs. Add a new Count ID to correct it.`);
-    return { ...count, delta: toNumber(prior.delta), processedAt: prior.processed_at.toISOString(), duplicate: true };
-  }
-  await client.query("SELECT id FROM parts WHERE id=$1 FOR UPDATE", [count.partId]);
-  const stock = (await client.query("SELECT on_hand FROM part_stock WHERE part_id=$1", [count.partId])).rows[0];
-  if (!stock) throw new SheetError(`Count ID ${count.id} names an unknown part.`);
-  const before = toNumber(stock.on_hand);
-  const delta = parseQuantity(Math.round((count.count - before) * 1e4) / 1e4, { label: "Physical-count adjustment" });
-  let entryId = null;
-  if (!dryRun && delta !== 0) {
-    const entry = await appendEntry(db, {
-      part: { kind: "id", id: count.partId },
-      entryType: "adjustment",
-      quantity: delta,
-      reference: `sheet-count:${count.id}`,
-      idempotencyScope: ["sheet-count", spreadsheetId],
-      note: count.reason,
-      createdBy: run.agentId,
-      provenance: { source: "sync_sheet", companyId: run.companyId, agentId: run.agentId, runId: run.runId, spreadsheetId, countId: count.id, physicalCount: count.count, beforeCount: before, countedAt: count.countedAt, countedBy: count.countedBy }
-    }, client);
-    entryId = entry.entry.id;
-  }
-  const processedAt = (/* @__PURE__ */ new Date()).toISOString();
-  if (!dryRun) await client.query(`INSERT INTO sheet_counts (spreadsheet_id,count_id,part_id,physical_count,reason,counted_at,counted_by,before_count,delta,ledger_entry_id,processed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [spreadsheetId, count.id, count.partId, count.count, count.reason, count.countedAt, count.countedBy, before, delta, entryId, processedAt]);
-  return { ...count, delta, processedAt, duplicate: false };
-}
-async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) {
-  const lock2 = await db.pool.connect();
-  const lockKey = JSON.stringify(["inventory-sheet", db.schema, spreadsheetId]);
-  try {
-    await lock2.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
-    const snapshot = await sheets.read();
-    const requests = [];
-    let nextId = Math.max(0, ...snapshot.sheets.map((t) => t.properties.sheetId)) + 1;
-    const tab = (title, headers) => {
-      const existing = snapshot.sheets.find((t) => t.properties.title === title);
-      if (existing) {
-        validateHeader(existing, headers);
-        return existing;
-      }
-      const created = { properties: { sheetId: nextId++, title, gridProperties: { rowCount: 1e3, columnCount: Math.max(26, headers.length) } } };
-      requests.push({ addSheet: { properties: created.properties } });
-      return created;
-    };
-    const inventory = tab("Inventory", INVENTORY_HEADERS);
-    const adjustments = tab("Adjustments", ADJUSTMENT_HEADERS);
-    const review = tab("Needs Review", REVIEW_HEADERS);
-    const inventoryRows = gridRows(inventory);
-    const counts = parseCounts(gridRows(adjustments));
-    const rowMap = /* @__PURE__ */ new Map();
-    const settings = /* @__PURE__ */ new Map();
-    for (let i = 1; i < inventoryRows.length; i++) {
-      const row = inventoryRows[i] ?? [];
-      row.slice(0, 11).forEach((cell, column) => inventoryCellValue(cell, i + 1, column));
-      const rawId = inventoryCellValue(row[0], i + 1, 0);
-      if (rawId === void 0 || rawId === "") {
-        if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
-        continue;
-      }
-      const id = text4(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
-      if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
-      rowMap.set(id, i);
-      settings.set(id, settingsOf(row, i + 1));
-    }
-    const result = await db.transaction(async (client) => {
-      const known = new Set((await client.query("SELECT id FROM parts")).rows.map((p) => p.id));
-      for (const id of rowMap.keys()) if (!known.has(id)) throw new SheetError("Inventory contains an unknown Part ID. Restore its original ID before syncing.");
-      for (const count of counts) if (!known.has(count.partId)) throw new SheetError(`Count ID ${count.id} names an unknown part.`);
-      const partIds = [...new Set(counts.map((c) => c.partId))].sort();
-      for (const id of partIds) await client.query("SELECT id FROM parts WHERE id=$1 FOR UPDATE", [id]);
-      const processed = [];
-      for (const count of counts) processed.push(await applyCount(db, client, spreadsheetId, count, run, dryRun));
-      if (!dryRun) for (const [id, setting] of settings) await client.query(`INSERT INTO part_sheet_settings(spreadsheet_id,part_id,settings) VALUES ($1,$2,$3::jsonb) ON CONFLICT(spreadsheet_id,part_id) DO UPDATE SET settings=EXCLUDED.settings,synced_at=now()`, [spreadsheetId, id, JSON.stringify(setting)]);
-      const stock = (await client.query(`SELECT s.*, costs.last_cost, costs.avg_cost, costs.last_ordered FROM part_stock s LEFT JOIN LATERAL (
-        SELECT (array_agg(unit_cost ORDER BY created_at DESC,id DESC) FILTER (WHERE unit_cost IS NOT NULL))[1] AS last_cost,
-        SUM(quantity_delta*unit_cost) FILTER (WHERE entry_type='purchase' AND unit_cost IS NOT NULL) / NULLIF(SUM(quantity_delta) FILTER (WHERE entry_type='purchase' AND unit_cost IS NOT NULL),0) AS avg_cost,
-        MAX(created_at) FILTER (WHERE entry_type='purchase') AS last_ordered FROM ledger_entries WHERE part_id=s.part_id
-      ) costs ON true ORDER BY s.vendor,s.vendor_part_number`)).rows;
-      const reviews = (await client.query("SELECT id,vendor,source_message_id,reason,parser_extraction,agent_extraction,created_at FROM review_queue WHERE status='open' ORDER BY created_at,id")).rows;
-      return { processed, stock, reviews };
-    });
-    let nextRow = Math.max(1, inventoryRows.length);
-    for (const part of result.stock) {
-      const row = rowMap.get(part.part_id) ?? nextRow++;
-      rowMap.set(part.part_id, row);
-      requests.push(writeCells(inventory.properties.sheetId, row, 0, [[part.part_id, `${part.vendor}:${part.vendor_part_number}`, part.description ?? "", part.unit_of_measure, toNumber(part.on_hand), toNumber(part.committed), toNumber(part.on_order), "Pending BOM integration", part.last_cost === null ? "" : toNumber(part.last_cost), part.avg_cost === null ? "" : toNumber(part.avg_cost), part.last_ordered ? part.last_ordered.toISOString() : ""]]));
-    }
-    for (const count of result.processed) requests.push(writeCells(adjustments.properties.sheetId, count.row, 6, [[count.processedAt, `Processed: ${count.delta >= 0 ? "+" : ""}${count.delta}`]]));
-    const excerpt = (value) => {
-      const json2 = JSON.stringify(value);
-      return json2.length <= 49e3 ? json2 : json2.slice(0, 48900) + "\u2026 [truncated; use list_review_queue for the full extraction]";
-    };
-    const reviewValues = result.reviews.map((r) => [r.id, r.vendor ?? "", r.source_message_id ?? "", r.reason, r.parser_extraction ? excerpt(r.parser_extraction) : "", r.agent_extraction ? excerpt(r.agent_extraction) : "", r.created_at.toISOString()]);
-    const reviewLength = Math.max(reviewValues.length, gridRows(review).length - 1);
-    while (reviewValues.length < reviewLength) reviewValues.push(Array(REVIEW_HEADERS.length).fill(""));
-    if (reviewValues.length) requests.push(writeCells(review.properties.sheetId, 1, 0, reviewValues));
-    const sizes = [...ensureSize(inventory, nextRow, INVENTORY_HEADERS.length), ...ensureSize(adjustments, Math.max(2, gridRows(adjustments).length), ADJUSTMENT_HEADERS.length), ...ensureSize(review, reviewLength + 1, REVIEW_HEADERS.length)];
-    requests.splice(requests.filter((r) => "addSheet" in r).length, 0, ...sizes);
-    for (const [t, headers] of [[inventory, INVENTORY_HEADERS], [adjustments, ADJUSTMENT_HEADERS], [review, REVIEW_HEADERS]]) {
-      if (!gridRows(t).some(populated)) requests.push(writeCells(t.properties.sheetId, 0, 0, [[...headers]]));
-      requests.push(protect(t, `${t.properties.title}:header`, { startRowIndex: 0, endRowIndex: 1 }, sheets.email));
-    }
-    requests.push(protect(inventory, "Inventory:system", { startColumnIndex: 0, endColumnIndex: 11 }, sheets.email));
-    requests.push(protect(adjustments, "Adjustments:status", { startColumnIndex: 6, endColumnIndex: 8 }, sheets.email));
-    requests.push(protect(review, "Needs Review:system", { startColumnIndex: 0, endColumnIndex: REVIEW_HEADERS.length }, sheets.email));
-    if (!dryRun) await sheets.batch(requests);
-    return { dryRun, inventoryParts: result.stock.length, settingsRead: settings.size, countsProcessed: result.processed.filter((c) => !c.duplicate).length, countsReplayed: result.processed.filter((c) => c.duplicate).length, openReviews: result.reviews.length, sellableImpact: "Pending BOM integration" };
-  } finally {
-    try {
-      await lock2.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]);
-    } finally {
-      lock2.release();
-    }
-  }
-}
-async function syncSheet(ctx, params2, run) {
-  if (!params2 || typeof params2 !== "object" || Array.isArray(params2)) throw new InputError("sync_sheet parameters must be an object.");
-  const dryRun = params2.dryRun;
-  if (dryRun !== void 0 && typeof dryRun !== "boolean") throw new InputError("dryRun must be a boolean.");
-  const settings = parseSheetSettings(await ctx.config.get(run.companyId));
-  const db = await openStore(ctx, run.companyId);
-  const client = await googleSheetsClient(ctx, run.companyId, settings);
-  const data = await synchronizeSheet(db, client, settings.spreadsheetId, run, dryRun === true);
-  return { content: `${dryRun ? "Previewed" : "Synced"} inventory Sheet: ${data.inventoryParts} parts, ${data.countsProcessed} new counts, ${data.openReviews} open reviews. Sellable impact awaits BOM integration.`, data };
-}
 
 // src/tools.ts
 var PART_ID = {
@@ -45377,20 +45517,54 @@ var TOOL_DECLARATIONS = [
     }
   },
   {
-    name: "sync_sheet",
-    displayName: "Sync the Google Sheet",
-    description: "Push system-owned columns to the inventory sheet, read the human-owned ones back, turn Adjustments-tab rows into ledger adjustments and mark them processed, and refresh the Needs Review view.",
+    name: "inventory_page",
+    displayName: "Read Inventory pages",
+    description: "Read inventory, counts, receiving, review, settings, history or dashboard data in the host-authorized company.",
     phase: 4,
-    parametersSchema: {
-      type: "object",
-      properties: {
-        dryRun: {
-          type: "boolean",
-          description: "Report what would change without writing to the sheet or the ledger.",
-          default: false
-        }
-      }
-    }
+    parametersSchema: { type: "object", properties: {
+      page: { type: "string", enum: ["inventory", "counts", "receiving", "review", "settings", "history", "dashboard"] },
+      search: { type: "string" },
+      vendor: { type: "string" },
+      active: { type: "string", enum: ["all", "true", "false"] },
+      lowStock: { type: "boolean" },
+      orderId: { type: "string" },
+      partId: { type: "string" }
+    }, required: ["page"] }
+  },
+  {
+    name: "inventory_action",
+    displayName: "Manage Inventory",
+    description: "Preview and submit atomic physical counts or receipts under Inventory policy. Human approval, metadata, settings and review operations require authenticated host authority; actor fields in parameters grant no permission.",
+    phase: 4,
+    parametersSchema: { type: "object", properties: {
+      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
+      lines: { type: "array", items: { type: "object", properties: { partId: { type: "string" }, counted: { type: "number" }, expected: { type: "number" }, ledgerRevision: { type: "string" }, quantity: { type: "number" } }, required: ["partId"] } },
+      reason: { type: "string" },
+      submissionKey: { type: "string" },
+      countId: { type: "string" },
+      orderId: { type: "string" },
+      previewId: { type: "string" },
+      shipmentReference: { type: "string" },
+      partId: { type: "string" },
+      quantityDelta: { type: "number" },
+      reference: { type: "string" },
+      revision: { type: "string" },
+      settings: { type: "object" },
+      parts: { type: "array", items: { type: "object" } },
+      reorderPoint: { type: "number" },
+      targetQuantity: { type: "number" },
+      location: { type: "string" },
+      notes: { type: "string" },
+      active: { type: "boolean" },
+      ledgerRevision: { type: "string" },
+      outstanding: { type: "number" },
+      reviewItemId: { type: "string" },
+      resolution: { type: "string", enum: ["accept", "accept_with_corrections", "reject"] },
+      note: { type: "string" },
+      corrections: { type: "object" },
+      independentExtraction: { type: "object" },
+      agentModel: { type: "string" }
+    }, required: ["operation"] }
   },
   {
     name: "sync_boms",
@@ -45453,15 +45627,23 @@ function toolError(ctx, toolName, companyId, error62) {
   });
   return { error: message2, content: message2, data: { error: message2 } };
 }
-var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"];
+var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_boms", "inventory_action", "inventory_page", "record_sale", "get_sellable", "reconcile_bigcommerce"];
 async function dispatch(ctx, declaration, params2, runCtx) {
+  toolActor(runCtx);
   switch (declaration.name) {
+    case "inventory_action": {
+      const data = structured(await nativeAction(ctx, toolActor(runCtx), params2));
+      return { content: "Inventory operation completed.", data };
+    }
+    case "inventory_page": {
+      const input2 = params2;
+      const db = await openStore(ctx, runCtx.companyId);
+      return { content: "Inventory data.", data: structured(await readNative(db, String(input2.page ?? "inventory"), input2)) };
+    }
     case "get_sellable":
       return getSellable(ctx, params2, runCtx);
     case "reconcile_bigcommerce":
       return reconcileBigcommerce(ctx, params2, runCtx);
-    case "sync_sheet":
-      return syncSheet(ctx, params2, runCtx);
     case "sync_boms":
       return syncBoms(ctx, params2, runCtx);
     case "record_sale":
@@ -45484,6 +45666,7 @@ async function dispatch(ctx, declaration, params2, runCtx) {
 }
 var plugin = definePlugin({
   async setup(ctx) {
+    registerNative(ctx);
     for (const declaration of TOOL_DECLARATIONS) {
       ctx.tools.register(
         declaration.name,
@@ -45496,7 +45679,7 @@ var plugin = definePlugin({
           try {
             const result = await dispatch(ctx, declaration, params2, runCtx);
             const data = structured(result.data);
-            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_sheet", "sync_boms"].includes(declaration.name);
+            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_boms"].includes(declaration.name);
             if (mutates && !params2?.dryRun && !result.error) {
               try {
                 data.stockSync = await pushStock(ctx, runCtx);
@@ -45544,11 +45727,6 @@ var plugin = definePlugin({
       schema = parseDatabaseSchema(config2[CONFIG_KEYS.databaseSchema]);
     } catch (error62) {
       errors.push(error62 instanceof ConfigError ? error62.message : "The schema name could not be validated.");
-    }
-    try {
-      parseEnabledVendors(config2[CONFIG_KEYS.enabledVendors]);
-    } catch (error62) {
-      errors.push(error62 instanceof ConfigError ? error62.message : "The vendor list could not be validated.");
     }
     if (errors.length > 0) return { ok: false, errors };
     return {
