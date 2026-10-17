@@ -190,7 +190,7 @@ var TOOL_DECLARATIONS = [
         },
         options: {
           type: "array",
-          description: `The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. An option this product's BOM has no lines for consumes nothing and is reported back.`,
+          description: 'The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. Every option name declared by the BOM requires exactly one selected value, including explicit no-parts values. Missing or conflicting selections refuse the sale. Options absent from the BOM are ignored and reported back.',
           items: {
             anyOf: [
               { type: "string" },
