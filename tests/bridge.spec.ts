@@ -130,6 +130,19 @@ integration("BigCommerce lifecycle", () => {
     expect(await apply(latest)).toEqual({duplicate:true});
     expect(await stock()).toMatchObject({onHand:20});
   });
+  it("refreshes a refund from the first observation before any line checkpoint exists", async()=>{
+    const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(rows[0].revision),reason:'Require review',settings:{...rows[0].settings,approvalMode:'all'}});
+    const observation={shipped:1,refunded:1,cancelled:true};
+    const first=await apply(observation) as any;
+    await executeNative(target.db,human,'reject_count',{countId:first.countId,reason:'Recheck first observation'});
+    const fresh=await executeNative(target.db,human,'refresh_refund_count',{countId:first.countId,reason:'Verify original returned parts'});
+    await executeNative(target.db,{...human,id:'second-reviewer'},'approve_count',{countId:fresh.countId,reason:'Verified'});
+    await apply(observation);
+    expect(await stock()).toMatchObject({onHand:20,committed:0});
+    expect(await apply(observation)).toEqual({duplicate:true});
+  });
   it("refreshes an overlapping pending refund for only the remaining units", async()=>{
     const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
     const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');

@@ -208,13 +208,12 @@ export async function executeNative(db:DatabaseHandle,actor:NativeActor,operatio
    const remaining=Number(key[3])-await appliedRefundUnits(client,key[1],key[2]);
    if(remaining<=0)throw new InputError('This refund has already been credited.');
    const line=await client.query('SELECT expansion FROM bigcommerce_lines WHERE order_id=$1 AND line_id=$2',[key[1],key[2]]);
-   if(!line.rows[0])throw new InputError('The refund order line was not found.');
    const parts=await client.query('SELECT id,vendor,vendor_part_number FROM parts');
    const ids=new Map(parts.rows.map(p=>[`${p.vendor}:${p.vendor_part_number}`.toLowerCase(),p.id]));
-   const deltas=line.rows[0].expansion.map((p:{part:string;quantity:number})=>{
+   const deltas=line.rows[0]?line.rows[0].expansion.map((p:{part:string;quantity:number})=>{
     const partId=ids.get(p.part.toLowerCase());if(!partId)throw new InputError('Pinned BOM part no longer exists.');
     return {partId,quantity:Number((remaining*p.quantity).toFixed(4))};
-   });
+   }):count.payload.lines.map((l:CountLine)=>({partId:l.partId,quantity:Number(((l.counted-l.expected)*remaining/Number(key[3])).toFixed(4))}));
    const submissionKey=`${count.submission_key}:after:${id}`;
    const next=await submitAdjustmentBatch(db,client,actor,deltas,submissionKey,count.reason,true);
    await audit(client,actor,operation,id,{countId:id,status:count.status},{...next,submissionKey},reason);
