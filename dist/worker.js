@@ -43394,7 +43394,15 @@ function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = 
     const line = entry;
     const pending = pendingOf(line.pending, `${at} pending`, problems);
     const description = text3(line.customer_description, `${at} customer_description`, problems);
-    const qty = quantity(line.qty, `${at} qty`, problems);
+    let qty;
+    if (line.qty === void 0 || line.qty === null) {
+      if (pending.length === 0) {
+        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
+      }
+    } else {
+      qty = quantity(line.qty, `${at} qty`, problems);
+      if (qty === void 0) continue;
+    }
     let part;
     if (line.part === void 0 || line.part === null) {
       if (pending.length === 0) {
@@ -43409,10 +43417,10 @@ function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = 
       seen.add(key);
     }
     const sourceLineId = line.source_line_id === void 0 ? void 0 : text3(line.source_line_id, `${at} source_line_id`, problems, 120);
-    if (qty === void 0 || description === void 0) continue;
+    if (description === void 0) continue;
     lines.push({
       ...part ? { part } : {},
-      qty,
+      ...qty === void 0 ? {} : { qty },
       customerDescription: description,
       ...scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {},
       ...sourceLineId ? { sourceLineId } : {},
@@ -44074,7 +44082,8 @@ async function expandSale(db, input2) {
     const consumed = [];
     let duplicates = 0;
     for (const line of lines) {
-      const quantity2 = parseQuantity(Math.round(line.qty * input2.qty * 1e4) / 1e4, {
+      const perUnit = line.qty;
+      const quantity2 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
         label: `Consumption of ${line.part}`,
         positive: true
       });
@@ -44100,7 +44109,7 @@ async function expandSale(db, input2) {
             bomId: active.bomId,
             bomVersion: active.version,
             bomSourceCommit: active.sourceCommit,
-            quantityPerUnit: line.qty,
+            quantityPerUnit: perUnit,
             unitsSold: input2.qty,
             reference: input2.reference,
             ...line.optionName ? { option: line.optionName, optionValue: line.optionValue } : {},
@@ -44121,7 +44130,7 @@ async function expandSale(db, input2) {
       consumed.push({
         partId: result.part.partId,
         partRef: result.part.ref,
-        quantityPerUnit: line.qty,
+        quantityPerUnit: perUnit,
         quantityConsumed: quantity2,
         ...line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {},
         duplicate: result.duplicate,

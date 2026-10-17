@@ -18,7 +18,7 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseBom } from "./bom.js";
-import { generateIncludedList, publicLines, renderLine } from "./install-docs.js";
+import { generateIncludedList, publicLines } from "./install-docs.js";
 
 interface Options {
   config: string;
@@ -86,7 +86,7 @@ async function main(argv: readonly string[]): Promise<number> {
       }
       changed += 1;
       console.log(`${bom.installDocument}: ${publicLines(bom).length} bullet(s) would change`);
-      for (const line of publicLines(bom)) console.log(`  + ${renderLine(line)}`);
+      for (const bullet of generated.bullets) console.log(`  + ${bullet}`);
       if (options.write) {
         await writeFile(target, generated.markdown, "utf8");
         console.log(`  written`);

@@ -151,6 +151,34 @@ lines:
     expect(bom?.lines[0]?.pending).toHaveLength(1);
   });
 
+  it("accepts a documented line whose quantity is not written down anywhere", () => {
+    // "Rubber with adhesive backing" names no length, area or unit. A zero
+    // there would be a lie about what is in the kit.
+    const { bom, problems } = parseBom(
+      "product-9002.yaml",
+      `
+catalog_key: product-9002
+status: draft
+lines:
+  - customer_description: "Rubber with adhesive backing"
+    pending:
+      - "quantity and unit of consumption are not in the document"
+      - "part unresolved"
+`,
+    );
+    expect(problems).toEqual([]);
+    expect(bom?.lines[0]?.qty).toBeUndefined();
+  });
+
+  it("refuses a line with no quantity and no reason", () => {
+    expect(
+      parseBom(
+        "product-9002.yaml",
+        "catalog_key: product-9002\nstatus: active\nlines:\n  - part: vendor-a:part-001\n    customer_description: \"Bracket\"\n",
+      ).problems.join("\n"),
+    ).toContain("needs a qty, or a pending reason");
+  });
+
   it("refuses a line with no part and no reason", () => {
     expect(parseBom("product-9002.yaml", DRAFT.replace(/    pending:[\s\S]*$/, "")).problems.join("\n"))
       .toContain("needs a part, or a pending reason");

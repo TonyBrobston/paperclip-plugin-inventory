@@ -35,7 +35,15 @@ export type CatalogKeyKind = "product_id" | "variant_sku";
 export interface BomLine {
   /** Absent only in a draft, where `pending` says what is missing. */
   part?: string;
-  qty: number;
+  /**
+   * Absent only in a draft.
+   *
+   * Some documented lines have no number at all — "Rubber with adhesive
+   * backing" names no length, area or unit of consumption. A zero there would
+   * be a lie about what the kit contains, so the line exists with its
+   * quantity still open.
+   */
+  qty?: number;
   customerDescription: string;
   /** Set on an option-scoped line; both halves or neither. */
   optionName?: string;
@@ -176,7 +184,15 @@ function parseLines(
     const line = entry as Record<string, unknown>;
     const pending = pendingOf(line.pending, `${at} pending`, problems);
     const description = text(line.customer_description, `${at} customer_description`, problems);
-    const qty = quantity(line.qty, `${at} qty`, problems);
+    let qty: number | undefined;
+    if (line.qty === undefined || line.qty === null) {
+      if (pending.length === 0) {
+        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
+      }
+    } else {
+      qty = quantity(line.qty, `${at} qty`, problems);
+      if (qty === undefined) continue;
+    }
 
     let part: string | undefined;
     if (line.part === undefined || line.part === null) {
@@ -202,10 +218,10 @@ function parseLines(
         ? undefined
         : text(line.source_line_id, `${at} source_line_id`, problems, 120);
 
-    if (qty === undefined || description === undefined) continue;
+    if (description === undefined) continue;
     lines.push({
       ...(part ? { part } : {}),
-      qty,
+      ...(qty === undefined ? {} : { qty }),
       customerDescription: description,
       ...(scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {}),
       ...(sourceLineId ? { sourceLineId } : {}),

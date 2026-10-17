@@ -55,8 +55,14 @@ const PART_NUMBER = /\b\d{4,6}[A-Za-z]\d{2,4}\b/;
 /** `vendor:part-number`, the internal reference form. */
 const PART_REFERENCE = /\b[a-z0-9][a-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._/-]{2,}\b/;
 
-/** The bullet the documents already use: `- 8x - Driver door bracket`. */
-export function renderLine(line: Pick<BomLine, "qty" | "customerDescription">): string {
+/**
+ * The bullet the documents already use: `- 8x - Driver door bracket`.
+ *
+ * The quantity is required here even though a draft line may not have one:
+ * a draft is refused before anything is rendered, so a bullet with no number
+ * has no way to exist.
+ */
+export function renderLine(line: { qty: number; customerDescription: string }): string {
   return `- ${line.qty}x - ${line.customerDescription}`;
 }
 
@@ -107,7 +113,9 @@ export function generateIncludedList(markdown: string, bom: BomFile): GeneratedD
     );
   }
 
-  const bullets = lines.map(renderLine);
+  const bullets = lines.map((line) =>
+    renderLine({ qty: line.qty!, customerDescription: line.customerDescription }),
+  );
   const problems = bullets.flatMap((bullet) => publicTextProblems(bullet).map((problem) => `"${bullet}" ${problem}`));
   if (problems.length > 0) {
     throw new DocumentGenerationError(

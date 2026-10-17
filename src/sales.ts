@@ -187,7 +187,10 @@ export async function expandSale(
     const consumed: SaleLine[] = [];
     let duplicates = 0;
     for (const line of lines) {
-      const quantity = parseQuantity(Math.round(line.qty * input.qty * 10_000) / 10_000, {
+      // Every line of an active version carries a part and a quantity: a file
+      // missing either is a draft, and a draft is never imported.
+      const perUnit = line.qty!;
+      const quantity = parseQuantity(Math.round(perUnit * input.qty * 10_000) / 10_000, {
         label: `Consumption of ${line.part}`,
         positive: true,
       });
@@ -213,7 +216,7 @@ export async function expandSale(
             bomId: active.bomId,
             bomVersion: active.version,
             bomSourceCommit: active.sourceCommit,
-            quantityPerUnit: line.qty,
+            quantityPerUnit: perUnit,
             unitsSold: input.qty,
             reference: input.reference,
             ...(line.optionName ? { option: line.optionName, optionValue: line.optionValue } : {}),
@@ -234,7 +237,7 @@ export async function expandSale(
       consumed.push({
         partId: result.part.partId,
         partRef: result.part.ref,
-        quantityPerUnit: line.qty,
+        quantityPerUnit: perUnit,
         quantityConsumed: quantity,
         ...(line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {}),
         duplicate: result.duplicate,

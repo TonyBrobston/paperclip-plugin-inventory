@@ -68,7 +68,15 @@ function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = 
     const line = entry;
     const pending = pendingOf(line.pending, `${at} pending`, problems);
     const description = text(line.customer_description, `${at} customer_description`, problems);
-    const qty = quantity(line.qty, `${at} qty`, problems);
+    let qty;
+    if (line.qty === void 0 || line.qty === null) {
+      if (pending.length === 0) {
+        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
+      }
+    } else {
+      qty = quantity(line.qty, `${at} qty`, problems);
+      if (qty === void 0) continue;
+    }
     let part;
     if (line.part === void 0 || line.part === null) {
       if (pending.length === 0) {
@@ -83,10 +91,10 @@ function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = 
       seen.add(key);
     }
     const sourceLineId = line.source_line_id === void 0 ? void 0 : text(line.source_line_id, `${at} source_line_id`, problems, 120);
-    if (qty === void 0 || description === void 0) continue;
+    if (description === void 0) continue;
     lines.push({
       ...part ? { part } : {},
-      qty,
+      ...qty === void 0 ? {} : { qty },
       customerDescription: description,
       ...scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {},
       ...sourceLineId ? { sourceLineId } : {},
@@ -254,7 +262,9 @@ function generateIncludedList(markdown, bom) {
       `bom/${bom.fileName} has no unconditional lines, so there is no kit list to publish.`
     );
   }
-  const bullets = lines.map(renderLine);
+  const bullets = lines.map(
+    (line) => renderLine({ qty: line.qty, customerDescription: line.customerDescription })
+  );
   const problems = bullets.flatMap((bullet) => publicTextProblems(bullet).map((problem) => `"${bullet}" ${problem}`));
   if (problems.length > 0) {
     throw new DocumentGenerationError(
@@ -347,7 +357,7 @@ async function main(argv) {
       }
       changed += 1;
       console.log(`${bom.installDocument}: ${publicLines(bom).length} bullet(s) would change`);
-      for (const line of publicLines(bom)) console.log(`  + ${renderLine(line)}`);
+      for (const bullet of generated.bullets) console.log(`  + ${bullet}`);
       if (options.write) {
         await writeFile(target, generated.markdown, "utf8");
         console.log(`  written`);
