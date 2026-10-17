@@ -9359,8 +9359,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text5) => {
-  return text5.charAt(0).toUpperCase() + text5.slice(1);
+var capitalizeFirstCharacter = (text4) => {
+  return text4.charAt(0).toUpperCase() + text4.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -28162,12 +28162,12 @@ function parseIntegerQuery(value, ctx, field2, fallback, min, max) {
   const raw = firstQueryValue(value);
   if (raw === void 0 || raw === null || raw === "")
     return fallback;
-  const text5 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
-  if (!/^-?\d+$/.test(text5)) {
+  const text4 = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!/^-?\d+$/.test(text4)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be an integer` });
     return fallback;
   }
-  const numeric = Number.parseInt(text5, 10);
+  const numeric = Number.parseInt(text4, 10);
   if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
     const range = min === 0 ? `between 0 and ${max}` : `between ${min} and ${max}`;
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `${field2} must be ${range}` });
@@ -42063,29 +42063,7 @@ var CONFIG_KEYS = {
    * Which vendors a business buys from is a deployment setting, so it comes
    * from config. The parser modules themselves ship with the plugin.
    */
-  enabledVendors: "enabledVendors",
-  /**
-   * The private config repository holding `bom/`, as `owner/name`.
-   *
-   * Which repository is a deployment setting, so it comes from config rather
-   * than from this code: the plugin is reusable and another business's BOMs
-   * live somewhere else entirely.
-   */
-  configRepo: "configRepo",
-  /** Branch to read BOMs from. Blank means the repository's default branch. */
-  configRepoBranch: "configRepoBranch",
-  /**
-   * Secret ref holding a GitHub token with read access to that repository.
-   *
-   * A ref rather than a string for the same reason as the database URL: the
-   * BOM files are private, and a token in plugin config is a token in a
-   * database row and in every settings API response.
-   */
-  configRepoToken: "configRepoToken",
-  /** BigCommerce store hash, used to resolve a BOM's catalog key. */
-  bigcommerceStoreHash: "bigcommerceStoreHash",
-  /** Secret ref holding a BigCommerce API token with product read access. */
-  bigcommerceToken: "bigcommerceToken"
+  enabledVendors: "enabledVendors"
 };
 var DEFAULT_DATABASE_SCHEMA = "inventory";
 var SCHEMA_NAME_PATTERN = "^[a-z_][a-z0-9_]{0,62}$";
@@ -42472,20 +42450,20 @@ async function findByIdempotencyKey(client, key) {
   );
   return rows[0] ? toEntry(rows[0]) : void 0;
 }
-function bucketsFor(entryType, quantity2, outstanding) {
+function bucketsFor(entryType, quantity, outstanding) {
   switch (entryType) {
     case "purchase":
-      return { quantityDelta: quantity2, onHandDelta: 0, onOrderDelta: quantity2 };
+      return { quantityDelta: quantity, onHandDelta: 0, onOrderDelta: quantity };
     case "receipt":
       return {
-        quantityDelta: quantity2,
-        onHandDelta: quantity2,
-        onOrderDelta: -Math.min(quantity2, outstanding)
+        quantityDelta: quantity,
+        onHandDelta: quantity,
+        onOrderDelta: -Math.min(quantity, outstanding)
       };
     case "sale":
-      return { quantityDelta: -quantity2, onHandDelta: -quantity2, onOrderDelta: 0 };
+      return { quantityDelta: -quantity, onHandDelta: -quantity, onOrderDelta: 0 };
     case "adjustment":
-      return { quantityDelta: quantity2, onHandDelta: quantity2, onOrderDelta: 0 };
+      return { quantityDelta: quantity, onHandDelta: quantity, onOrderDelta: 0 };
   }
 }
 async function appendEntry(db, input2, transactionClient) {
@@ -42780,9 +42758,9 @@ function optionalText(value, label2) {
   return trimmed;
 }
 function requiredText(value, label2) {
-  const text5 = optionalText(value, label2);
-  if (text5 === void 0) throw new InputError(`${label2} is required.`);
-  return text5;
+  const text4 = optionalText(value, label2);
+  if (text4 === void 0) throw new InputError(`${label2} is required.`);
+  return text4;
 }
 function provenanceOf(tool3, runCtx, extra) {
   return {
@@ -42822,7 +42800,7 @@ function entryResult(tool3, result, verb) {
 async function recordReceipt(ctx, rawParams, runCtx) {
   const input2 = params(rawParams);
   const part = parsePartRef(input2.partId);
-  const quantity2 = parseQuantity(input2.quantity, { label: "Quantity", positive: true });
+  const quantity = parseQuantity(input2.quantity, { label: "Quantity", positive: true });
   const reference = requiredText(input2.reference, "A reference");
   const delivery = optionalText(input2.delivery, "The delivery");
   const note = optionalText(input2.note, "The note");
@@ -42830,7 +42808,7 @@ async function recordReceipt(ctx, rawParams, runCtx) {
   const result = await appendEntry(db, {
     part,
     entryType: "receipt",
-    quantity: quantity2,
+    quantity,
     reference,
     idempotencyScope: delivery ? ["receipt", delivery] : ["receipt"],
     note,
@@ -42841,10 +42819,10 @@ async function recordReceipt(ctx, rawParams, runCtx) {
     }),
     createdBy: runCtx.agentId
   });
-  if (result.duplicate && result.entry.quantityDelta !== quantity2) {
+  if (result.duplicate && result.entry.quantityDelta !== quantity) {
     const which = delivery ? `Delivery "${delivery}" against reference "${reference}"` : `Reference "${reference}"`;
     throw new InputError(
-      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`
+      `${which} was already used to receive ${result.entry.quantityDelta} of ${result.part.ref}, not ${quantity}. Nothing was changed. If this is a second shipment against the same order, pass its packing slip as "delivery"; record an adjustment if the first one was wrong.`
     );
   }
   return entryResult("record_receipt", result, "receipt");
@@ -43047,8 +43025,8 @@ function partLink(raw) {
   return matched ? { vendorPartNumber: matched[2], description: matched[1].trim() } : void 0;
 }
 function describe3(description, packSize) {
-  const text5 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
-  return text5 ? text5 : void 0;
+  const text4 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
+  return text4 ? text4 : void 0;
 }
 function merchandise(raw) {
   const matched = /^\|(?:\s*\|)*\s*Merchandise\s*\|\s*(\$?[\d,]+\.\d{2,4})\s*\|$/mi.exec(raw);
@@ -43073,10 +43051,10 @@ function parseConfirmation(raw) {
     if (!cell || cell.length !== 5 || !/^\d+$/.test(cell[0])) continue;
     const part = partLink(cell[1]);
     if (!part) continue;
-    const { quantity: quantity2, packSize } = ordered(cell[2]);
+    const { quantity, packSize } = ordered(cell[2]);
     lines.push({
       vendorPartNumber: part.vendorPartNumber,
-      quantity: quantity2,
+      quantity,
       unitPrice: unitPrice(cell[3]),
       lineTotal: amount(cell[4], "line total"),
       ...describe3(part.description, packSize) ? { description: describe3(part.description, packSize) } : {}
@@ -43094,12 +43072,12 @@ function parseReceipt(raw, header) {
     if (!cell || cell.length !== 8 || !/^\d+$/.test(cell[0])) continue;
     const part = partLink(cell[1]);
     if (!part) continue;
-    const { quantity: quantity2, packSize } = ordered(cell[3]);
+    const { quantity, packSize } = ordered(cell[3]);
     const stated = /\bpacks?\s+of\s+\d+\b/i.test(cell[2]);
     const described = describe3(cell[2], stated ? void 0 : packSize);
     lines.push({
       vendorPartNumber: part.vendorPartNumber,
-      quantity: quantity2,
+      quantity,
       unitPrice: unitPrice(cell[6]),
       lineTotal: amount(cell[7], "line total"),
       ...described ? { description: described } : {}
@@ -43327,888 +43305,6 @@ async function resolveReviewItem(ctx, raw, run) {
   return { content: `Review item ${result.status}.`, data: result };
 }
 
-// src/bom.ts
-import { createHash as createHash3 } from "node:crypto";
-import { parse as parseYaml } from "yaml";
-var PRODUCT_KEY = /^product-[0-9]+$/;
-var VARIANT_SKU = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-var PART_REF = /^[a-z0-9][a-z0-9._-]*:[^\s][^\u0000-\u001f]{0,127}$/;
-var QUANTITY_SCALE2 = 4;
-var MAX_QUANTITY = 1e6;
-var MAX_TEXT2 = 500;
-var CONTROL_CHARACTERS3 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-function text3(value, label2, problems, max = MAX_TEXT2) {
-  if (typeof value !== "string" || value.trim() === "") {
-    problems.push(`${label2} is required`);
-    return void 0;
-  }
-  if (value.length > max) {
-    problems.push(`${label2} is longer than ${max} characters`);
-    return void 0;
-  }
-  if (CONTROL_CHARACTERS3.test(value)) {
-    problems.push(`${label2} contains control characters`);
-    return void 0;
-  }
-  return value.trim();
-}
-function quantity(value, label2, problems) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    problems.push(`${label2} must be a positive number, found ${JSON.stringify(value)}`);
-    return void 0;
-  }
-  if (value > MAX_QUANTITY) {
-    problems.push(`${label2} is ${value}; a per-unit quantity that large is a typo`);
-    return void 0;
-  }
-  if (Number(value.toFixed(QUANTITY_SCALE2)) !== value) {
-    problems.push(`${label2} has more than ${QUANTITY_SCALE2} decimal places`);
-    return void 0;
-  }
-  return value;
-}
-function pendingOf(value, label2, problems) {
-  if (value === void 0 || value === null) return [];
-  const entries2 = Array.isArray(value) ? value : [value];
-  const reasons = [];
-  for (const [index, entry] of entries2.entries()) {
-    const reason = text3(entry, `${label2}[${index}]`, problems, 1e3);
-    if (reason) reasons.push(reason);
-  }
-  if (reasons.length === 0) problems.push(`${label2} must say what is unresolved`);
-  return reasons;
-}
-function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = {}) {
-  if (allowEmpty && Array.isArray(raw) && raw.length === 0) return [];
-  if (!Array.isArray(raw) || raw.length === 0) {
-    problems.push(`${where} must list at least one line`);
-    return [];
-  }
-  const lines = [];
-  for (const [index, entry] of raw.entries()) {
-    const at = `${where}[${index}]`;
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      problems.push(`${at} is not a mapping`);
-      continue;
-    }
-    const line = entry;
-    const pending = pendingOf(line.pending, `${at} pending`, problems);
-    const description = text3(line.customer_description, `${at} customer_description`, problems);
-    let qty;
-    if (line.qty === void 0 || line.qty === null) {
-      if (pending.length === 0) {
-        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
-      }
-    } else {
-      qty = quantity(line.qty, `${at} qty`, problems);
-      if (qty === void 0) continue;
-    }
-    let part;
-    if (line.part === void 0 || line.part === null) {
-      if (pending.length === 0) {
-        problems.push(`${at} needs a part, or a pending reason saying why it has none yet`);
-      }
-    } else if (typeof line.part !== "string" || !PART_REF.test(line.part)) {
-      problems.push(`${at} part must look like vendor:part-number, found ${JSON.stringify(line.part)}`);
-    } else {
-      part = line.part.trim();
-      const key = `${scope.optionName ?? ""}\0${scope.optionValue ?? ""}\0${part.toLowerCase()}`;
-      if (seen.has(key)) problems.push(`${at} lists ${part} twice in the same option scope`);
-      seen.add(key);
-    }
-    const sourceLineId = line.source_line_id === void 0 ? void 0 : text3(line.source_line_id, `${at} source_line_id`, problems, 120);
-    if (description === void 0) continue;
-    lines.push({
-      ...part ? { part } : {},
-      ...qty === void 0 ? {} : { qty },
-      customerDescription: description,
-      ...scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {},
-      ...sourceLineId ? { sourceLineId } : {},
-      pending
-    });
-  }
-  return lines;
-}
-function validateBom(fileName, document2) {
-  const problems = [];
-  if (document2 === null || typeof document2 !== "object" || Array.isArray(document2)) {
-    return { problems: ["is empty or is not a mapping"] };
-  }
-  const raw = document2;
-  const expectedKey = fileName.replace(/\.ya?ml$/, "");
-  const catalogKey = text3(raw.catalog_key, "catalog_key", problems, 64);
-  if (catalogKey !== void 0 && catalogKey !== expectedKey) {
-    problems.push(`catalog_key "${catalogKey}" does not match the file name "${expectedKey}"`);
-  }
-  let catalogKeyKind;
-  if (catalogKey !== void 0) {
-    const inferred = PRODUCT_KEY.test(catalogKey) ? "product_id" : VARIANT_SKU.test(catalogKey) ? "variant_sku" : void 0;
-    if (!inferred) {
-      problems.push(
-        `catalog_key "${catalogKey}" is neither a variant SKU nor product-<id>. Use the variant SKU when the product has one; otherwise product-<BigCommerce product id>.`
-      );
-    } else if (raw.catalog_key_kind !== void 0 && raw.catalog_key_kind !== inferred) {
-      problems.push(
-        `catalog_key_kind says ${JSON.stringify(raw.catalog_key_kind)} but "${catalogKey}" is a ${inferred}`
-      );
-    } else {
-      catalogKeyKind = inferred;
-    }
-  }
-  const status = raw.status === void 0 ? "active" : raw.status;
-  if (status !== "active" && status !== "draft") {
-    problems.push(`status must be "active" or "draft", found ${JSON.stringify(raw.status)}`);
-  }
-  const installDocument = raw.install_document === void 0 ? void 0 : text3(raw.install_document, "install_document", problems, 300);
-  if (installDocument !== void 0 && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
-    problems.push(
-      `install_document "${installDocument}" is not an install-instructions/<name>.MD path in the documentation repository`
-    );
-  }
-  const sourceRevision = raw.source_revision === void 0 ? void 0 : text3(raw.source_revision, "source_revision", problems, 64);
-  const seen = /* @__PURE__ */ new Set();
-  const lines = parseLines(raw.lines, "lines", {}, problems, seen);
-  if (raw.unresolved_lines !== void 0) {
-    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, /* @__PURE__ */ new Set(), { allowEmpty: true });
-    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
-    if (status !== "draft" && unresolvedLines.length > 0) {
-      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
-    }
-  }
-  const optionScopes = [];
-  if (raw.options !== void 0) {
-    if (!Array.isArray(raw.options)) {
-      problems.push("options must be a list");
-    } else {
-      const scopes = /* @__PURE__ */ new Set();
-      for (const [index, entry] of raw.options.entries()) {
-        const at = `options[${index}]`;
-        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-          problems.push(`${at} is not a mapping`);
-          continue;
-        }
-        const option = entry;
-        const optionName = text3(option.bigcommerce_option, `${at} bigcommerce_option`, problems, 250);
-        const optionValue = text3(option.option_value, `${at} option_value`, problems, 250);
-        if (optionName === void 0 || optionValue === void 0) continue;
-        const scope = `${optionName}\0${optionValue}`;
-        if (scopes.has(scope)) {
-          problems.push(`${at} repeats the option value "${optionName}: ${optionValue}"`);
-        }
-        scopes.add(scope);
-        optionScopes.push({ optionName, optionValue });
-        lines.push(
-          ...parseLines(option.lines, `${at} lines`, { optionName, optionValue }, problems, seen, {
-            allowEmpty: true
-          })
-        );
-      }
-    }
-  }
-  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
-  if (status === "active" && unresolved.length > 0) {
-    problems.push(
-      `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`
-    );
-  }
-  if (status === "draft" && unresolved.length === 0) {
-    problems.push("status: draft with nothing pending. Set status: active to put this BOM into use.");
-  }
-  if (problems.length > 0 || catalogKey === void 0 || catalogKeyKind === void 0) {
-    return { problems };
-  }
-  return {
-    bom: {
-      fileName,
-      catalogKey,
-      catalogKeyKind,
-      status,
-      ...installDocument ? { installDocument } : {},
-      ...sourceRevision ? { sourceRevision } : {},
-      lines,
-      optionScopes
-    },
-    problems
-  };
-}
-function parseBom(fileName, yamlText) {
-  let document2;
-  try {
-    document2 = parseYaml(yamlText);
-  } catch (error62) {
-    return { problems: [`is not valid YAML: ${error62.message}`] };
-  }
-  return validateBom(fileName, document2);
-}
-function contentHash(bom) {
-  const canonical = (rows) => [...rows].sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1);
-  const lines = canonical(
-    bom.lines.map((line) => [
-      line.optionName ?? "",
-      line.optionValue ?? "",
-      line.part ?? "",
-      line.qty,
-      line.customerDescription
-    ])
-  );
-  const scopes = canonical(bom.optionScopes.map((s) => [s.optionName, s.optionValue]));
-  return createHash3("sha256").update(JSON.stringify([bom.catalogKey, bom.catalogKeyKind, lines, scopes])).digest("hex");
-}
-function selectLines(bom, selections) {
-  const chosen = new Set(selections.map((s) => `${s.option}\0${s.value}`));
-  const declared = new Set(bom.optionScopes.map((s) => `${s.optionName}\0${s.optionValue}`));
-  const names = new Set(bom.optionScopes.map((s) => s.optionName));
-  return {
-    lines: bom.lines.filter(
-      (line) => !line.inclusionPending && (line.optionName === void 0 || chosen.has(`${line.optionName}\0${line.optionValue}`))
-    ),
-    missing: [...names].filter((name) => !selections.some((s) => s.option === name)),
-    conflicting: [...names].filter((name) => new Set(selections.filter((s) => s.option === name).map((s) => s.value)).size > 1),
-    unmatched: selections.filter(
-      (s) => names.has(s.option) && !declared.has(`${s.option}\0${s.value}`)
-    ),
-    ignored: selections.filter((s) => !names.has(s.option))
-  };
-}
-
-// src/catalog.ts
-var CatalogError = class extends OperatorFacingError {
-};
-var STORE_HASH = /^[a-z0-9]{5,30}$/;
-var PAGE_SIZE = 250;
-var MAX_PAGES = 40;
-var TIMEOUT_MS = 3e4;
-function parseCatalogSettings(config2) {
-  const storeHash = config2[CONFIG_KEYS.bigcommerceStoreHash];
-  if (typeof storeHash !== "string" || !STORE_HASH.test(storeHash)) {
-    throw new ConfigError(
-      `Set the BigCommerce store hash in ${SETTINGS_PATH}. A BOM is only accepted once its catalog key is known to the store, so syncing cannot skip this check.`
-    );
-  }
-  if (!isSecretRefBinding(config2[CONFIG_KEYS.bigcommerceToken])) {
-    throw new ConfigError(
-      "Select a Paperclip secret holding a BigCommerce API token with read access to products. The plugin only reads the catalog with it."
-    );
-  }
-  return { storeHash, token: config2[CONFIG_KEYS.bigcommerceToken] };
-}
-function indexProducts(products) {
-  const byProductKey = /* @__PURE__ */ new Map();
-  const bySku = /* @__PURE__ */ new Map();
-  let variantSkuCount = 0;
-  for (const raw of products) {
-    const options = /* @__PURE__ */ new Map();
-    for (const option of raw.options ?? []) {
-      const name = option.display_name;
-      if (typeof name !== "string" || name === "") continue;
-      const values2 = options.get(name) ?? /* @__PURE__ */ new Set();
-      for (const value of option.option_values ?? []) {
-        if (typeof value.label === "string" && value.label !== "") values2.add(value.label);
-      }
-      options.set(name, values2);
-    }
-    const product = { productId: raw.id, name: raw.name ?? "", options };
-    byProductKey.set(`product-${raw.id}`, product);
-    for (const sku of [raw.sku, ...(raw.variants ?? []).map((variant) => variant.sku)]) {
-      if (typeof sku !== "string" || sku.trim() === "") continue;
-      bySku.set(sku.trim().toLowerCase(), product);
-      variantSkuCount += 1;
-    }
-  }
-  return {
-    productCount: byProductKey.size,
-    variantSkuCount,
-    lookup(key, kind) {
-      return kind === "product_id" ? byProductKey.get(key) : bySku.get(key.trim().toLowerCase());
-    }
-  };
-}
-async function readCatalog(ctx, companyId, settings) {
-  const token = await ctx.secrets.resolve(settings.token, {
-    companyId,
-    configPath: CONFIG_KEYS.bigcommerceToken
-  });
-  if (!token) throw new ConfigError("The configured BigCommerce token secret resolved to an empty value.");
-  const products = [];
-  for (let page2 = 1; page2 <= MAX_PAGES; page2++) {
-    const url2 = `https://api.bigcommerce.com/stores/${settings.storeHash}/v3/catalog/products?include=variants,options&limit=${PAGE_SIZE}&page=${page2}`;
-    const response = await fetch(url2, {
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { "X-Auth-Token": token, Accept: "application/json" }
-    });
-    if (!response.ok) {
-      throw new CatalogError(
-        `BigCommerce refused to list the catalog (HTTP ${response.status}). Check the store hash and token in ${SETTINGS_PATH}; nothing was imported.`
-      );
-    }
-    const body = await response.json();
-    products.push(...body.data ?? []);
-    if (page2 >= (body.meta?.pagination?.total_pages ?? 1)) break;
-  }
-  const index = indexProducts(products);
-  ctx.logger.info("Read the BigCommerce catalog", {
-    companyId,
-    products: index.productCount,
-    variantSkus: index.variantSkuCount
-  });
-  return index;
-}
-
-// src/config-repo.ts
-var ConfigRepoError = class extends OperatorFacingError {
-};
-var REPO = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
-var REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$/;
-var MAX_FILE_BYTES = 256 * 1024;
-var MAX_FILES = 300;
-var TIMEOUT_MS2 = 3e4;
-function parseConfigRepoSettings(config2) {
-  const repo = config2[CONFIG_KEYS.configRepo];
-  if (typeof repo !== "string" || !REPO.test(repo)) {
-    throw new ConfigError(
-      `Set the private config repository as owner/name in ${SETTINGS_PATH} before syncing BOMs.`
-    );
-  }
-  if (!isSecretRefBinding(config2[CONFIG_KEYS.configRepoToken])) {
-    throw new ConfigError(
-      "Select a Paperclip secret holding a GitHub token with read access to the private config repository. BOM files are private, so the token is a secret ref rather than plugin config."
-    );
-  }
-  const branch = config2[CONFIG_KEYS.configRepoBranch];
-  if (branch !== void 0 && branch !== null && branch !== "") {
-    if (typeof branch !== "string" || !REF.test(branch)) {
-      throw new ConfigError("The config repository branch is not a usable branch name.");
-    }
-  }
-  return {
-    repo,
-    token: config2[CONFIG_KEYS.configRepoToken],
-    ...typeof branch === "string" && branch !== "" ? { branch } : {}
-  };
-}
-async function githubConfigRepo(ctx, companyId, settings) {
-  const token = await ctx.secrets.resolve(settings.token, {
-    companyId,
-    configPath: CONFIG_KEYS.configRepoToken
-  });
-  if (!token) throw new ConfigError("The configured GitHub token secret resolved to an empty value.");
-  const base = `https://api.github.com/repos/${settings.repo}`;
-  const request = async (url2, accept) => {
-    const response = await fetch(url2, {
-      signal: AbortSignal.timeout(TIMEOUT_MS2),
-      headers: {
-        Accept: accept,
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "paperclip-plugin-inventory"
-      }
-    });
-    if (!response.ok) {
-      throw new ConfigRepoError(
-        `GitHub refused to read ${settings.repo} (HTTP ${response.status}). Check that the token in ${SETTINGS_PATH} is current and has read access to that repository, then run sync_boms again.`
-      );
-    }
-    return response;
-  };
-  const json2 = async (path4) => await (await request(`${base}${path4}`, "application/vnd.github+json")).json();
-  return {
-    repo: settings.repo,
-    async headCommit() {
-      const branch = settings.branch ?? (await json2("")).default_branch;
-      if (!branch || !REF.test(branch)) {
-        throw new ConfigRepoError(`${settings.repo} did not report a usable default branch.`);
-      }
-      const commit = await json2(`/commits/${encodeURIComponent(branch)}`);
-      if (!commit.sha || !/^[0-9a-f]{40}$/.test(commit.sha)) {
-        throw new ConfigRepoError(`${settings.repo} did not report a commit for ${branch}.`);
-      }
-      return commit.sha;
-    },
-    async readBoms(commit) {
-      if (!REF.test(commit)) throw new ConfigError("That is not a usable commit or branch name.");
-      const ref = `?ref=${encodeURIComponent(commit)}`;
-      const listing = await json2(`/contents/bom${ref}`);
-      if (!Array.isArray(listing)) {
-        throw new ConfigRepoError(`${settings.repo} has no bom/ directory at ${commit}.`);
-      }
-      const files = listing.filter((entry) => entry.type === "file" && /\.ya?ml$/.test(entry.name)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-      if (files.length > MAX_FILES) {
-        throw new ConfigRepoError(
-          `bom/ holds ${files.length} files, more than this sync will read at once (${MAX_FILES}).`
-        );
-      }
-      const sources = [];
-      for (const file3 of files) {
-        if ((file3.size ?? 0) > MAX_FILE_BYTES) {
-          throw new ConfigRepoError(
-            `${file3.path} is ${file3.size} bytes, which is too large to be a BOM. Nothing was imported.`
-          );
-        }
-        const response = await request(
-          `${base}/contents/${file3.path.split("/").map((segment) => encodeURIComponent(segment)).join("/")}${ref}`,
-          "application/vnd.github.raw"
-        );
-        sources.push({ path: file3.path, fileName: file3.name, text: await response.text() });
-      }
-      ctx.logger.info("Read BOM files from the config repository", {
-        companyId,
-        repo: settings.repo,
-        commit,
-        files: sources.length
-      });
-      return sources;
-    }
-  };
-}
-
-// src/bom-sync.ts
-var BomValidationError = class extends OperatorFacingError {
-  constructor(problems) {
-    super(
-      `Nothing was imported. ${problems.length} problem${problems.length === 1 ? "" : "s"} in the BOM files:
-${problems.map((problem) => `  - ${problem}`).join("\n")}`
-    );
-    this.problems = problems;
-  }
-  problems;
-};
-var SYNC_STATE_KEY = "boms";
-async function readParts(client) {
-  const { rows } = await client.query("SELECT id, vendor, vendor_part_number FROM parts");
-  const index = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    index.set(`${row.vendor}:${String(row.vendor_part_number).toLowerCase()}`, row.id);
-  }
-  return {
-    idOf(ref) {
-      let part;
-      try {
-        part = parsePartRef(ref);
-      } catch {
-        return void 0;
-      }
-      if (part.kind !== "vendor") return void 0;
-      return index.get(`${part.vendor}:${part.vendorPartNumber.toLowerCase()}`);
-    }
-  };
-}
-function validateAgainstCatalog(boms, catalog) {
-  const problems = [];
-  const warnings = [];
-  const keys = /* @__PURE__ */ new Map();
-  for (const bom of boms) {
-    const where = `bom/${bom.fileName}`;
-    const duplicate = keys.get(bom.catalogKey);
-    if (duplicate) {
-      problems.push(`${where}: catalog key ${bom.catalogKey} is also declared by ${duplicate}`);
-      continue;
-    }
-    keys.set(bom.catalogKey, where);
-    const product = catalog.lookup(bom.catalogKey, bom.catalogKeyKind);
-    if (!product) {
-      const message2 = `${where}: BigCommerce has no ${bom.catalogKeyKind === "product_id" ? "product" : "variant SKU"} ${bom.catalogKey}, so sales of it would consume nothing`;
-      if (bom.status === "draft") warnings.push(message2);
-      else problems.push(message2);
-      continue;
-    }
-    if (bom.status === "draft") continue;
-    for (const scope of bom.optionScopes) {
-      const values2 = product.options.get(scope.optionName);
-      if (!values2) {
-        problems.push(
-          `${where}: product ${product.productId} has no option named "${scope.optionName}". Its options are ${[...product.options.keys()].map((name) => `"${name}"`).join(", ") || "(none)"}.`
-        );
-      } else if (!values2.has(scope.optionValue)) {
-        problems.push(
-          `${where}: option "${scope.optionName}" on product ${product.productId} has no value "${scope.optionValue}". Its values are ${[...values2].map((value) => `"${value}"`).join(", ") || "(none)"}.`
-        );
-      }
-    }
-  }
-  return { problems, warnings };
-}
-async function synchronizeBoms(db, repo, catalog, run, options = {}) {
-  const commit = options.commit ?? await repo.headCommit();
-  const dryRun = options.dryRun === true;
-  const sources = await repo.readBoms(commit);
-  const problems = [];
-  const boms = [];
-  const paths = /* @__PURE__ */ new Map();
-  for (const source of sources) {
-    const { bom, problems: fileProblems } = parseBom(source.fileName, source.text);
-    for (const problem of fileProblems) problems.push(`${source.path}: ${problem}`);
-    if (bom) {
-      boms.push(bom);
-      paths.set(bom.fileName, source.path);
-    }
-  }
-  const catalogCheck = validateAgainstCatalog(boms, catalog);
-  problems.push(...catalogCheck.problems);
-  const warnings = [...catalogCheck.warnings];
-  if (problems.length > 0) throw new BomValidationError(problems);
-  const active = boms.filter((bom) => bom.status === "active");
-  const drafts = boms.filter((bom) => bom.status === "draft");
-  const result = await db.transaction(async (client) => {
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-      JSON.stringify(["inventory-boms", db.schema])
-    ]);
-    const existing = await client.query(
-      "SELECT DISTINCT ON (catalog_key) catalog_key, version FROM boms ORDER BY catalog_key, version DESC"
-    );
-    const present = new Set(boms.map((bom) => bom.catalogKey));
-    for (const current of existing.rows) {
-      if (!present.has(current.catalog_key)) {
-        warnings.push(`No BOM file for ${current.catalog_key} exists at ${commit}, but version ${current.version} is still active and still expands on every sale. Deleting a file does not retire an immutable version.`);
-      }
-    }
-    const parts = await readParts(client);
-    const partProblems = [];
-    const resolved = /* @__PURE__ */ new Map();
-    for (const bom of active) {
-      const byRef = /* @__PURE__ */ new Map();
-      for (const line of bom.lines) {
-        const ref = line.part;
-        const partId = parts.idOf(ref);
-        if (!partId) {
-          partProblems.push(
-            `bom/${bom.fileName}: this inventory has no part ${ref}. Receive it or record an adjustment for it first; a BOM may not invent a part.`
-          );
-          continue;
-        }
-        byRef.set(ref, partId);
-      }
-      resolved.set(bom.catalogKey, byRef);
-    }
-    if (partProblems.length > 0) throw new BomValidationError(partProblems);
-    const imported = [];
-    const unchanged = [];
-    const held = [];
-    const activeVersionOf = async (catalogKey) => (await client.query(
-      "SELECT id, version, content_hash FROM boms WHERE catalog_key = $1 ORDER BY version DESC LIMIT 1",
-      [catalogKey]
-    )).rows[0];
-    for (const bom of active) {
-      const hash2 = contentHash(bom);
-      const current = await activeVersionOf(bom.catalogKey);
-      if (current && current.content_hash === hash2) {
-        unchanged.push(bom.catalogKey);
-        continue;
-      }
-      const version2 = (current?.version ?? 0) + 1;
-      if (dryRun) {
-        imported.push({ catalogKey: bom.catalogKey, version: version2, lines: bom.lines.length, contentHash: hash2 });
-        continue;
-      }
-      const inserted = await client.query(
-        `INSERT INTO boms (catalog_key, catalog_key_kind, version, content_hash, source_commit,
-                           source_path, source_revision, option_scopes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id`,
-        [
-          bom.catalogKey,
-          bom.catalogKeyKind,
-          version2,
-          hash2,
-          commit,
-          paths.get(bom.fileName) ?? `bom/${bom.fileName}`,
-          bom.sourceRevision ?? null,
-          JSON.stringify(
-            bom.optionScopes.map((scope) => ({ option: scope.optionName, value: scope.optionValue }))
-          )
-        ]
-      );
-      const bomId = inserted.rows[0].id;
-      const byRef = resolved.get(bom.catalogKey);
-      for (const line of bom.lines) {
-        await client.query(
-          `INSERT INTO bom_lines (bom_id, option_name, option_value, part_id, quantity_per_unit,
-                                  customer_description, source_line_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            bomId,
-            line.optionName ?? null,
-            line.optionValue ?? null,
-            byRef.get(line.part),
-            line.qty,
-            line.customerDescription,
-            line.sourceLineId ?? null
-          ]
-        );
-      }
-      imported.push({ catalogKey: bom.catalogKey, version: version2, lines: bom.lines.length, contentHash: hash2 });
-    }
-    for (const bom of drafts) {
-      const current = await activeVersionOf(bom.catalogKey);
-      held.push({
-        catalogKey: bom.catalogKey,
-        pendingLines: bom.lines.filter((line) => line.pending.length > 0).length,
-        activeVersion: current?.version ?? null
-      });
-      if (current) {
-        warnings.push(
-          `bom/${bom.fileName} is a draft, but version ${current.version} of ${bom.catalogKey} is already active and still expands on every sale. Versions are immutable; sync a corrected active BOM to supersede it.`
-        );
-      }
-    }
-    if (!dryRun) {
-      await client.query(
-        `INSERT INTO sync_state (key, cursor, details, updated_at)
-         VALUES ($1, $2, $3::jsonb, now())
-         ON CONFLICT (key) DO UPDATE SET cursor = EXCLUDED.cursor, details = EXCLUDED.details, updated_at = now()`,
-        [
-          SYNC_STATE_KEY,
-          commit,
-          JSON.stringify({
-            repo: repo.repo,
-            files: sources.length,
-            imported: imported.length,
-            unchanged: unchanged.length,
-            held: held.length,
-            syncedBy: run.agentId,
-            runId: run.runId
-          })
-        ]
-      );
-    }
-    return { imported, unchanged, held };
-  });
-  return {
-    dryRun,
-    repo: repo.repo,
-    commit,
-    files: sources.length,
-    ...result,
-    warnings
-  };
-}
-async function syncBoms(ctx, rawParams, run) {
-  if (rawParams === null || typeof rawParams !== "object" || Array.isArray(rawParams)) {
-    throw new InputError("sync_boms parameters must be an object.");
-  }
-  const params2 = rawParams;
-  if (params2.dryRun !== void 0 && typeof params2.dryRun !== "boolean") {
-    throw new InputError("dryRun must be a boolean.");
-  }
-  if (params2.commit !== void 0 && typeof params2.commit !== "string") {
-    throw new InputError("commit must be a string.");
-  }
-  const config2 = await ctx.config.get(run.companyId);
-  const repoSettings = parseConfigRepoSettings(config2);
-  const catalogSettings = parseCatalogSettings(config2);
-  const db = await openStore(ctx, run.companyId);
-  const [repo, catalog] = await Promise.all([
-    githubConfigRepo(ctx, run.companyId, repoSettings),
-    readCatalog(ctx, run.companyId, catalogSettings)
-  ]);
-  const data = await synchronizeBoms(db, repo, catalog, run, {
-    ...typeof params2.commit === "string" ? { commit: params2.commit } : {},
-    dryRun: params2.dryRun === true
-  });
-  const heldNote = data.held.length ? ` ${data.held.length} draft${data.held.length === 1 ? "" : "s"} held (${data.held.map((bom) => `${bom.catalogKey}: ${bom.pendingLines} unresolved`).join("; ")}).` : "";
-  return {
-    content: `${data.dryRun ? "Previewed" : "Synced"} ${data.files} BOM file${data.files === 1 ? "" : "s"} at ${data.commit.slice(0, 10)}: ${data.imported.length} new version${data.imported.length === 1 ? "" : "s"}, ${data.unchanged.length} unchanged.${heldNote}${data.warnings.length ? `
-Warnings:
-${data.warnings.map((warning) => `  - ${warning}`).join("\n")}` : ""}`,
-    data
-  };
-}
-
-// src/sales.ts
-var MAX_OPTIONS = 50;
-async function readActiveBom(client, catalogKey) {
-  const { rows } = await client.query(
-    `SELECT id, version, catalog_key, catalog_key_kind, content_hash, source_commit, option_scopes
-       FROM boms WHERE catalog_key = $1 ORDER BY version DESC LIMIT 1`,
-    [catalogKey]
-  );
-  const head = rows[0];
-  if (!head) return void 0;
-  const lines = await client.query(
-    `SELECT l.option_name, l.option_value, l.quantity_per_unit, l.customer_description,
-            l.source_line_id, p.vendor, p.vendor_part_number, l.part_id
-       FROM bom_lines l JOIN parts p ON p.id = l.part_id
-      WHERE l.bom_id = $1
-      ORDER BY l.option_name NULLS FIRST, l.option_value NULLS FIRST, p.vendor, p.vendor_part_number`,
-    [head.id]
-  );
-  return {
-    bomId: head.id,
-    version: Number(head.version),
-    catalogKey: head.catalog_key,
-    sourceCommit: head.source_commit ?? null,
-    bom: {
-      fileName: `${head.catalog_key}.yaml`,
-      catalogKey: head.catalog_key,
-      catalogKeyKind: head.catalog_key_kind,
-      status: "active",
-      lines: lines.rows.map((row) => ({
-        part: formatPartRef(row.vendor, row.vendor_part_number),
-        qty: Number(row.quantity_per_unit),
-        customerDescription: row.customer_description,
-        ...row.option_name ? { optionName: row.option_name } : {},
-        ...row.option_value ? { optionValue: row.option_value } : {},
-        ...row.source_line_id ? { sourceLineId: row.source_line_id } : {},
-        pending: []
-      })),
-      optionScopes: (head.option_scopes ?? []).filter((scope) => typeof scope.option === "string" && typeof scope.value === "string").map((scope) => ({ optionName: scope.option, optionValue: scope.value }))
-    }
-  };
-}
-function parseSelections(raw) {
-  if (raw === void 0 || raw === null) return [];
-  if (!Array.isArray(raw)) throw new InputError("options must be a list.");
-  if (raw.length > MAX_OPTIONS) throw new InputError(`An order with more than ${MAX_OPTIONS} options is not a real order.`);
-  return raw.map((entry, index) => {
-    const at = `options[${index}]`;
-    if (typeof entry === "string") {
-      const separator = entry.indexOf(":");
-      if (separator <= 0 || entry.slice(separator + 1).trim() === "") {
-        throw new InputError(
-          `${at} is "${entry}", which names an option but not the value the customer chose. Pass "option name: value", or { option, value }.`
-        );
-      }
-      return { option: entry.slice(0, separator).trim(), value: entry.slice(separator + 1).trim() };
-    }
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new InputError(`${at} must be "option name: value" or an object with option and value.`);
-    }
-    const { option, value } = entry;
-    if (typeof option !== "string" || option.trim() === "" || typeof value !== "string" || value.trim() === "") {
-      throw new InputError(`${at} must carry both an option name and the chosen value.`);
-    }
-    return { option: option.trim(), value: value.trim() };
-  });
-}
-async function expandSale(db, input2) {
-  return db.transaction(async (client) => {
-    const active = await readActiveBom(client, input2.catalogKey);
-    if (!active) {
-      throw new InputError(
-        `No BOM is active for ${input2.catalogKey}. Add the BOM file to the config repository and run sync_boms; until then a sale of this product has nothing to consume, and recording it would understate what was used.`
-      );
-    }
-    const { lines, unmatched, ignored, missing, conflicting } = selectLines(active.bom, input2.selections);
-    if (missing.length > 0 || conflicting.length > 0) {
-      throw new InputError(
-        `BOM version ${active.version} of ${active.catalogKey} requires exactly one selection for each declared option. Missing: ${missing.join(", ") || "none"}; conflicting: ${conflicting.join(", ") || "none"}. Nothing was consumed.`
-      );
-    }
-    if (unmatched.length > 0) {
-      throw new InputError(
-        `BOM version ${active.version} of ${active.catalogKey} has no answer for ${unmatched.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}. The storefront offers a value this BOM does not, which is an option renamed or added without updating the BOM. Nothing was consumed.`
-      );
-    }
-    if (lines.length === 0) {
-      throw new LedgerError(
-        `BOM version ${active.version} of ${active.catalogKey} expands to no lines for these options, so this sale would consume nothing.`
-      );
-    }
-    const consumed = [];
-    let duplicates = 0;
-    for (const line of lines) {
-      const perUnit = line.qty;
-      const quantity2 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
-        label: `Consumption of ${line.part}`,
-        positive: true
-      });
-      const result = await appendEntry(
-        db,
-        {
-          part: parsePartRef(line.part),
-          entryType: "sale",
-          quantity: quantity2,
-          reference: input2.reference,
-          // The reference is the BigCommerce order id and line, so repeating it
-          // is the same sale. The part is added by `appendEntry` from the
-          // resolved row, which is what makes a retry recognisable.
-          idempotencyScope: ["sale"],
-          note: line.customerDescription,
-          provenance: {
-            source: "record_sale",
-            agentId: input2.run.agentId,
-            runId: input2.run.runId,
-            companyId: input2.run.companyId,
-            projectId: input2.run.projectId,
-            catalogKey: active.catalogKey,
-            bomId: active.bomId,
-            bomVersion: active.version,
-            bomSourceCommit: active.sourceCommit,
-            quantityPerUnit: perUnit,
-            unitsSold: input2.qty,
-            reference: input2.reference,
-            ...line.optionName ? { option: line.optionName, optionValue: line.optionValue } : {},
-            ...line.sourceLineId ? { sourceLineId: line.sourceLineId } : {}
-          },
-          createdBy: input2.run.agentId
-        },
-        client
-      );
-      if (result.duplicate) {
-        duplicates += 1;
-        if (result.entry.quantityDelta !== -quantity2) {
-          throw new InputError(
-            `Reference "${input2.reference}" already consumed ${-result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. A sale that really did change quantity needs a new reference; a BOM that changed needs an adjustment.`
-          );
-        }
-      }
-      consumed.push({
-        partId: result.part.partId,
-        partRef: result.part.ref,
-        quantityPerUnit: perUnit,
-        quantityConsumed: quantity2,
-        ...line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {},
-        duplicate: result.duplicate,
-        onHand: result.stock.onHand
-      });
-    }
-    if (duplicates > 0 && duplicates < consumed.length) {
-      throw new InputError(
-        `Reference "${input2.reference}" was already recorded against a different set of parts than BOM version ${active.version} expands to (${duplicates} of ${consumed.length} lines matched). Nothing was changed. Record an adjustment for the difference rather than re-recording the sale.`
-      );
-    }
-    return {
-      catalogKey: active.catalogKey,
-      bomVersion: active.version,
-      bomId: active.bomId,
-      qty: input2.qty,
-      reference: input2.reference,
-      lines: consumed,
-      ignoredOptions: [...ignored],
-      duplicate: duplicates > 0
-    };
-  });
-}
-async function recordSale(ctx, rawParams, run) {
-  if (rawParams === null || typeof rawParams !== "object" || Array.isArray(rawParams)) {
-    throw new InputError("record_sale parameters must be an object.");
-  }
-  const params2 = rawParams;
-  const catalogKey = typeof params2.productSku === "string" ? params2.productSku.trim() : "";
-  if (catalogKey === "" || catalogKey.length > 64) {
-    throw new InputError(
-      "A product is required: its BigCommerce variant SKU, or product-<id> for a product whose variants have no SKU."
-    );
-  }
-  const qty = parseQuantity(params2.qty, { label: "The sold quantity", positive: true });
-  const reference = typeof params2.reference === "string" ? params2.reference.trim() : "";
-  if (reference === "") {
-    throw new InputError(
-      "A reference is required \u2014 the BigCommerce order id and line. It is what makes recording the same sale twice harmless."
-    );
-  }
-  const selections = parseSelections(params2.options);
-  const db = await openStore(ctx, run.companyId);
-  const data = await expandSale(db, { catalogKey, qty, reference, selections, run });
-  const summary = data.lines.map((line) => `${line.partRef}: ${line.quantityConsumed} consumed, ${line.onHand} on hand`).join("\n");
-  const ignored = data.ignoredOptions.length ? `
-Options with no BOM lines behind them, so nothing was consumed for them: ${data.ignoredOptions.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}.` : "";
-  return {
-    content: data.duplicate ? `Already recorded \u2014 reference "${data.reference}" consumed these parts before, so nothing changed.
-${summary}` : `Sale of ${data.qty} \xD7 ${data.catalogKey} consumed ${data.lines.length} part${data.lines.length === 1 ? "" : "s"} through BOM version ${data.bomVersion}.
-${summary}${ignored}`,
-    data
-  };
-}
-
 // src/sheets-client.ts
 import { createSign } from "node:crypto";
 var SheetError = class extends OperatorFacingError {
@@ -44295,7 +43391,7 @@ var ADJUSTMENT_HEADERS = ["Count ID", "Part ID", "Physical count", "Reason", "Co
 var REVIEW_HEADERS = ["Review ID", "Vendor", "Message ID", "Reason", "Parser extraction", "Agent extraction", "Created at"];
 var MANAGED = "inventory-plugin:";
 var UUID2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function text4(value, label2, max = 500) {
+function text3(value, label2, max = 500) {
   if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new SheetError(`${label2} must be nonblank text (at most ${max} characters).`);
   return value.trim();
 }
@@ -44323,16 +43419,16 @@ function parseCounts(rows) {
     if (!populated(row.slice(0, 6))) continue;
     validateInputCells(row.slice(0, 6), `Adjustments row ${i + 1}`);
     const cells2 = values(row);
-    const id = text4(cells2[0], `Adjustments row ${i + 1} Count ID`, 100);
+    const id = text3(cells2[0], `Adjustments row ${i + 1} Count ID`, 100);
     if (ids.has(id)) throw new SheetError(`Duplicate Count ID in Adjustments row ${i + 1}. Give each physical count a unique ID.`);
     ids.add(id);
-    const partId = text4(cells2[1], `Adjustments row ${i + 1} Part ID`).toLowerCase();
+    const partId = text3(cells2[1], `Adjustments row ${i + 1} Part ID`).toLowerCase();
     if (!UUID2.test(partId)) throw new SheetError(`Adjustments row ${i + 1} requires the Inventory Part ID.`);
     const count = parseQuantity(cells2[2], { label: `Adjustments row ${i + 1} physical count` });
     if (count < 0) throw new SheetError("Physical counts cannot be negative.");
-    const countedAt = text4(cells2[4], `Adjustments row ${i + 1} Counted at`);
+    const countedAt = text3(cells2[4], `Adjustments row ${i + 1} Counted at`);
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(countedAt) || !Number.isFinite(Date.parse(countedAt))) throw new SheetError(`Adjustments row ${i + 1} Counted at must be an ISO timestamp with a time zone.`);
-    counts.push({ row: i, id, partId, count, reason: text4(cells2[3], `Adjustments row ${i + 1} Count reason`), countedAt, countedBy: text4(cells2[5], `Adjustments row ${i + 1} Counted by`) });
+    counts.push({ row: i, id, partId, count, reason: text3(cells2[3], `Adjustments row ${i + 1} Count reason`), countedAt, countedBy: text3(cells2[5], `Adjustments row ${i + 1} Counted by`) });
   }
   return counts;
 }
@@ -44363,7 +43459,7 @@ function settingsOf(row, rowNumber) {
     } else if (offset === 4) {
       if (typeof value !== "boolean") throw new SheetError(`${field2} must be a checkbox boolean.`);
       result[name] = value;
-    } else result[name] = text4(value, field2, 5e3);
+    } else result[name] = text3(value, field2, 5e3);
   }
   return result;
 }
@@ -44440,7 +43536,7 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
         if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
         continue;
       }
-      const id = text4(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
+      const id = text3(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
       settings.set(id, settingsOf(row, i + 1));
@@ -44635,25 +43731,13 @@ var TOOL_DECLARATIONS = [
       properties: {
         productSku: {
           type: "string",
-          description: "The product's catalog key: its BigCommerce variant SKU, or product-<id> for a product whose variants carry no SKU. Most products in this catalog are the second kind.",
+          description: "The BigCommerce SKU of the product sold.",
           minLength: 1
         },
         options: {
           type: "array",
-          description: 'The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. Every option name declared by the BOM requires exactly one selected value, including explicit no-parts values. Missing or conflicting selections refuse the sale. Options absent from the BOM are ignored and reported back.',
-          items: {
-            anyOf: [
-              { type: "string" },
-              {
-                type: "object",
-                properties: {
-                  option: { type: "string", minLength: 1 },
-                  value: { type: "string", minLength: 1 }
-                },
-                required: ["option", "value"]
-              }
-            ]
-          }
+          description: "Selected BigCommerce option names, which may add their own BOM lines.",
+          items: { type: "string" }
         },
         qty: POSITIVE_QTY,
         reference: {
@@ -44751,7 +43835,7 @@ var TOOL_DECLARATIONS = [
   {
     name: "sync_boms",
     displayName: "Sync BOMs",
-    description: "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists, and that every catalog key and option value exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part. A changed quantity becomes a new version; what past sales consumed never changes. Draft BOMs \u2014 documented quantities whose part mappings are not confirmed yet \u2014 are reported and held, never imported.",
+    description: "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists and every SKU exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part.",
     phase: 5,
     parametersSchema: {
       type: "object",
@@ -44809,15 +43893,11 @@ function toolError(ctx, toolName, companyId, error62) {
   });
   return { error: message2, content: message2, data: { error: message2 } };
 }
-var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale"];
+var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet"];
 async function dispatch(ctx, declaration, params2, runCtx) {
   switch (declaration.name) {
     case "sync_sheet":
       return syncSheet(ctx, params2, runCtx);
-    case "sync_boms":
-      return syncBoms(ctx, params2, runCtx);
-    case "record_sale":
-      return recordSale(ctx, params2, runCtx);
     case "submit_order_email":
       return submitOrderEmail(ctx, params2, runCtx);
     case "list_review_queue":
