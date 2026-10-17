@@ -339,6 +339,19 @@ var manifest = {
         },
         required: ["type", "secretId"]
       },
+      spreadsheetId: {
+        type: "string",
+        title: "Spreadsheet ID (optional until Sheet sync)",
+        description: "Copy from private deployment settings. Never put a real spreadsheet ID in public code.",
+        pattern: "^[a-zA-Z0-9_-]{10,200}$"
+      },
+      googleServiceAccount: {
+        type: "object",
+        format: "secret-ref",
+        title: "Google service-account JSON key",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"]
+      },
       [CONFIG_KEYS.databaseSchema]: {
         type: "string",
         title: "Schema name (optional)",
