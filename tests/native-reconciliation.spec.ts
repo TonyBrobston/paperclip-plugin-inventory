@@ -47,6 +47,18 @@ integration('native reconciliation',()=>{
   const over=await executeNative(t.db,submitter,'adjust',{partId,quantityDelta:5,reference:'over',reason:'Shelf correction'});expect(over.status).toBe('pending');
   const retry=await executeNative(t.db,submitter,'adjust',{partId,quantityDelta:1,reference:'within',reason:'Shelf correction'});expect(retry.duplicate).toBe(true);
  });
+ it('keeps old pending counts and open reviews visible after more than 200 decisions',async()=>{
+  const pending=await submit('old-pending');
+  await exec(t,`INSERT INTO physical_counts(submission_key,reason,submitted_by,policy_snapshot,settings_revision,payload,status,submitted_at,decided_by,decided_at,decision_reason)
+   SELECT 'newer-'||n,'Synthetic history','{}',s.settings,s.revision,'{}','rejected',now()+interval '1 day','{}',now(),'Synthetic rejected' FROM generate_series(1,205) n CROSS JOIN operational_settings s`);
+  const open=await exec(t,"INSERT INTO review_queue(reason,created_at) VALUES('Old pending',now()-interval '1 day') RETURNING id");
+  await exec(t,"INSERT INTO review_queue(reason,status,resolved_at,created_at) SELECT 'Newer history','rejected',now(),now() FROM generate_series(1,205)");
+  const counts=await readNative(t.db,'counts',{}),review=await readNative(t.db,'review',{});
+  expect((counts.counts as any[]).map(c=>c.id)).toContain(pending.countId);
+  expect((review.counts as any[]).map(c=>c.id)).toContain(pending.countId);
+  expect((review.items as any[]).map(c=>c.id)).toContain(open[0].id);
+  expect(counts.counts).toHaveLength(201);expect(review.items).toHaveLength(201);
+ });
  it('imports offline metadata once, validates every line and leaves stock untouched',async()=>{
   const current=await readNative(t.db,'settings',{});
   const part={partId,reorderPoint:2,targetQuantity:8,location:'Synthetic shelf',notes:'Offline import',active:true};
@@ -89,6 +101,32 @@ integration('native receiving',()=>{
   expect(first.previewId).not.toBe(revised.previewId);
   await expect(executeNative(t.db,reviewer,'confirm_receipt',{previewId:first.previewId})).rejects.toThrow(/not found/);
   expect(await exec(t,"SELECT * FROM ledger_entries WHERE entry_type='receipt'")).toHaveLength(0);
+ });
+ it('serializes concurrent preview replacement and confirmation without deadlocks',async()=>{
+  const first=await preview(5,'race');
+  // Pause confirmation after its first preview read, then let refresh reach its
+  // preview-row query. The former row-first locking deadlocked at this barrier.
+  let observed!:()=>void,release!:()=>void,refreshReached!:()=>void;
+  const read=new Promise<void>(r=>observed=r),gate=new Promise<void>(r=>release=r),waiting=new Promise<void>(r=>refreshReached=r);
+  const wrap=(mode:string)=>({...t.db,transaction:(fn:any)=>t.db.transaction(c=>fn(new Proxy(c,{get(target,key){
+   if(key!=='query')return Reflect.get(target,key);
+   return async(sql:string,args:any[])=>{
+    if(mode==='preview'&&sql.startsWith('SELECT * FROM receipt_previews WHERE order_id'))refreshReached();
+    const result=await target.query(sql,args);
+    if(mode==='confirm'&&sql.startsWith('SELECT * FROM receipt_previews WHERE id=')){observed();await gate;}
+    return result;
+   };
+  }})))});
+  const confirm=executeNative(wrap('confirm') as any,reviewer,'confirm_receipt',{previewId:first.previewId});
+  await read;
+  const refreshed=executeNative(wrap('preview') as any,submitter,'preview_receipt',{orderId,shipmentReference:'race',lines:[{partId,quantity:5}]});
+  await waiting;release();
+  const results=await Promise.allSettled([refreshed,confirm]);
+  for(const result of results)if(result.status==='rejected')expect(result.reason.message).toMatch(/not found/);
+  expect(results[0].status).toBe('fulfilled');
+  if(results[0].status==='fulfilled')await executeNative(t.db,reviewer,'confirm_receipt',{previewId:results[0].value.previewId});
+  expect(Number((await exec(t,'SELECT on_hand FROM part_stock WHERE part_id=$1',[partId]))[0].on_hand)).toBe(5);
+  expect(await exec(t,'SELECT * FROM receipt_history')).toHaveLength(1);
  });
  it('receives partial shipments, rejects stale previews, and audits short close separately',async()=>{
   const first=await preview(5,'first');const stale=await preview(4,'stale');

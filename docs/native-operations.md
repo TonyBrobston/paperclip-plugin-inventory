@@ -20,9 +20,11 @@ Migrations run transactionally when the first scoped Inventory request opens sto
 
 Preview a count batch, review expected/count/discrepancy, and submit with a reason. Preserve its submission key across retries. Original quantities, ledger revisions, submitter and policy are immutable; each adjustment links uniquely to a count line. Approval locks all affected parts and applies the entire batch in one transaction. Any changed stock revision rejects the whole batch; reject it and preview a new count.
 
+A stale BigCommerce refund keeps reconciliation paused. Reject its old count, then use **Refresh refund for approval** with a reason. An authorized human creates a fresh stock/policy snapshot linked to the immutable rejection through the operational audit; refresh never credits stock automatically. A separate approver is required when self approval is disabled. Approve the new proposal, then retry reconciliation; retries follow the audited successor and credit once. Rejection alone never schedules a new refund proposal.
+
 Receiving selects an order and shipment reference, previews prior receipts/outstanding quantities and requires a reason for any overage. Confirmation rechecks revisions and outstanding quantities under locks. Receipt quantity records actual stock; receiving 21 against 20 ordered adds 21 on hand and clears 20 on order. Short close separately records undelivered quantities and a reason. Applied receipt and short-close history remain available.
 
-Needs Review exposes intake evidence and count submissions. Rejection records a decision without stock movement; intake acceptance still enforces extraction verification. Corrections must satisfy the existing extraction schema. Unsupported vendor verification may require the agent tool's independent-extraction fields.
+Physical Counts and Needs Review return all pending counts/open reviews before up to 200 recent completed records, so new history cannot hide actionable decisions. Needs Review exposes intake evidence and count submissions. Rejection records a decision without stock movement; intake acceptance still enforces extraction verification. Corrections must satisfy the existing extraction schema. Unsupported vendor verification may require the agent tool's independent-extraction fields.
 
 ## Backup, restore and rollback
 

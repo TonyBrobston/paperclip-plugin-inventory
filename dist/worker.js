@@ -43499,7 +43499,7 @@ async function applyCount(db, client, count, actor, reason) {
   await client.query("UPDATE physical_counts SET status='applied' WHERE id=$1", [count.id]);
   return { countId: count.id, status: "applied", duplicate: false };
 }
-async function submitCount(db, client, actor, input2, allowNegative = false) {
+async function submitCount(db, client, actor, input2, allowNegative = false, forceApproval = false) {
   const lines = countLines(input2.lines, allowNegative);
   const key = text2(input2.submissionKey, "Submission key");
   const reason = text2(input2.reason, "Reason");
@@ -43519,10 +43519,10 @@ async function submitCount(db, client, actor, input2, allowNegative = false) {
  VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6::jsonb,'pending') RETURNING *`, [key, reason, json2(actor), json2(current.settings), current.revision, json2(payload)]);
   const count = result.rows[0];
   for (const l of lines) await client.query("INSERT INTO physical_count_lines(count_id,part_id,expected,counted,ledger_revision) VALUES($1,$2,$3,$4,$5)", [count.id, l.partId, l.expected, l.counted, l.ledgerRevision]);
-  if (!needsApproval(current.settings, lines)) return applyCount(db, client, count, { ...actor }, "Applied automatically within configured discrepancy thresholds");
+  if (!forceApproval && !needsApproval(current.settings, lines)) return applyCount(db, client, count, { ...actor }, "Applied automatically within configured discrepancy thresholds");
   return { countId: count.id, status: "pending", duplicate: false };
 }
-async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, reason) {
+async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, reason, forceApproval = false) {
   await settings(client, true);
   const previous = await client.query("SELECT * FROM physical_counts WHERE submission_key=$1", [submissionKey]);
   if (previous.rows[0]) {
@@ -43530,6 +43530,8 @@ async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, r
     const actual = old.payload.lines.map((l) => [l.partId, Number((l.counted - l.expected).toFixed(4))]).sort();
     const requested = deltas.map((l) => [l.partId, l.quantity]).sort();
     if (old.reason !== reason || json2(actual) !== json2(requested)) throw new InputError("Adjustment batch key was already used with different quantities.");
+    const successor = await client.query("SELECT after_value->>'submissionKey' AS key FROM operational_audit WHERE operation='refresh_refund_count' AND target=$1 ORDER BY id DESC LIMIT 1", [old.id]);
+    if (old.status === "rejected" && successor.rows[0]) return submitAdjustmentBatch(db, client, actor, deltas, successor.rows[0].key, reason, true);
     return { countId: old.id, status: old.status, duplicate: true };
   }
   await lockParts(client, deltas.map((l) => l.partId));
@@ -43538,7 +43540,7 @@ async function submitAdjustmentBatch(db, client, actor, deltas, submissionKey, r
     const snap = await snapshot(client, delta.partId);
     lines.push({ ...snap, counted: Number((snap.expected + delta.quantity).toFixed(4)) });
   }
-  return submitCount(db, client, actor, { lines, submissionKey, reason }, true);
+  return submitCount(db, client, actor, { lines, submissionKey, reason }, true, forceApproval);
 }
 async function orderRows(client, orderId) {
   const order = await client.query("SELECT * FROM orders WHERE id=$1", [orderId]);
@@ -43652,6 +43654,24 @@ async function executeNative(db, actor, operation, input2) {
       const snap = await snapshot(client, id);
       return submitCount(db, client, actor, { submissionKey: key, reason, lines: [{ ...snap, counted: Number((snap.expected + delta).toFixed(4)) }] }, true);
     }
+    if (operation === "refresh_refund_count") {
+      const current = await settings(client, true);
+      const id = uuid3(input2.countId, "Count ID");
+      const reason = text2(input2.reason, "Refresh reason");
+      const result = await client.query("SELECT * FROM physical_counts WHERE id=$1 FOR UPDATE", [id]);
+      const count = result.rows[0];
+      if (!count || !count.submission_key.startsWith('["bc-refund",')) throw new InputError("A BigCommerce refund count is required.");
+      approver(actor, current.settings);
+      approver(actor, count.policy_snapshot);
+      if (count.status !== "rejected") throw new InputError("Reject the stale refund before refreshing it.");
+      const prior = await client.query("SELECT after_value FROM operational_audit WHERE operation='refresh_refund_count' AND target=$1", [id]);
+      if (prior.rows[0]) return { ...prior.rows[0].after_value, duplicate: true };
+      const deltas = count.payload.lines.map((l) => ({ partId: l.partId, quantity: Number((l.counted - l.expected).toFixed(4)) }));
+      const submissionKey = `${count.submission_key}:after:${id}`;
+      const next = await submitAdjustmentBatch(db, client, actor, deltas, submissionKey, count.reason, true);
+      await audit(client, actor, operation, id, { countId: id, status: count.status }, { ...next, submissionKey }, reason);
+      return next;
+    }
     if (operation === "approve_count" || operation === "reject_count") {
       const current = await settings(client, true);
       const id = uuid3(input2.countId, "Count ID");
@@ -43681,6 +43701,7 @@ async function executeNative(db, actor, operation, input2) {
         return { partId: uuid3(l.partId, "Part ID"), quantity: parseQuantity(l.quantity, { label: "Receipt quantity", positive: true }) };
       });
       if (new Set(requested.map((l) => l.partId)).size !== requested.length) throw new InputError("A part may appear only once per shipment.");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`receipt:${orderId}:${shipment}`]);
       await lockParts(client, requested.map((l) => l.partId));
       const state = await orderRows(client, orderId);
       const lines = requested.map((l) => {
@@ -43691,7 +43712,6 @@ async function executeNative(db, actor, operation, input2) {
       const reason = typeof input2.reason === "string" ? input2.reason.trim() : "";
       if (lines.some((l) => l.overage > 0) && !reason) throw new InputError("Overages require a reason.");
       if (reason) text2(reason, "Reason");
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`receipt:${orderId}:${shipment}`]);
       const old = await client.query("SELECT * FROM receipt_previews WHERE order_id=$1 AND shipment_reference=$2 FOR UPDATE", [orderId, shipment]);
       if (old.rows[0]?.applied_at) {
         if (json2(old.rows[0].lines.map((l) => [l.partId, l.quantity]).sort()) !== json2(lines.map((l) => [l.partId, l.quantity]).sort())) throw new InputError("Shipment reference was already used for different quantities.");
@@ -43703,12 +43723,16 @@ async function executeNative(db, actor, operation, input2) {
     }
     if (operation === "confirm_receipt") {
       const id = uuid3(input2.previewId, "Receipt preview ID");
+      const initial = await client.query("SELECT * FROM receipt_previews WHERE id=$1", [id]);
+      const observed = initial.rows[0];
+      if (!observed) throw new InputError("Receipt preview was not found.");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`receipt:${observed.order_id}:${observed.shipment_reference}`]);
+      await lockParts(client, observed.lines.map((l) => l.partId));
       const r = await client.query("SELECT * FROM receipt_previews WHERE id=$1 FOR UPDATE", [id]);
       const preview = r.rows[0];
       if (!preview) throw new InputError("Receipt preview was not found.");
       if (preview.applied_at) return { previewId: id, duplicate: true };
       const lines = preview.lines;
-      await lockParts(client, lines.map((l) => l.partId));
       const current = await orderRows(client, preview.order_id);
       for (const l of lines) {
         const state = current.lines.find((x) => x.partId === l.partId);
@@ -43766,9 +43790,9 @@ async function readNative(db, page2, input2) {
       return { parts: rows.rows };
     }
     if (page2 === "counts" || page2 === "review") {
-      const counts = await client.query(`SELECT c.*,COALESCE((SELECT jsonb_agg(to_jsonb(l)||jsonb_build_object('vendor',p.vendor,'vendorPartNumber',p.vendor_part_number) ORDER BY l.part_id) FROM physical_count_lines l JOIN parts p ON p.id=l.part_id WHERE l.count_id=c.id),'[]'::jsonb) AS lines FROM physical_counts c ORDER BY submitted_at DESC LIMIT 200`);
+      const counts = await client.query(`SELECT c.*,COALESCE((SELECT jsonb_agg(to_jsonb(l)||jsonb_build_object('vendor',p.vendor,'vendorPartNumber',p.vendor_part_number) ORDER BY l.part_id) FROM physical_count_lines l JOIN parts p ON p.id=l.part_id WHERE l.count_id=c.id),'[]'::jsonb) AS lines FROM physical_counts c WHERE c.status='pending' OR c.id IN (SELECT id FROM physical_counts WHERE status<>'pending' ORDER BY submitted_at DESC,id LIMIT 200) ORDER BY (c.status='pending') DESC,c.submitted_at DESC,c.id`);
       if (page2 === "counts") return { counts: counts.rows };
-      const review = await client.query(`SELECT r.*,(SELECT provenance FROM email_intake i WHERE i.review_id=r.id LIMIT 1) AS intake_provenance FROM review_queue r ORDER BY created_at DESC LIMIT 200`);
+      const review = await client.query(`SELECT r.*,(SELECT provenance FROM email_intake i WHERE i.review_id=r.id LIMIT 1) AS intake_provenance FROM review_queue r WHERE r.status='open' OR r.id IN (SELECT id FROM review_queue WHERE status<>'open' ORDER BY created_at DESC,id LIMIT 200) ORDER BY (r.status='open') DESC,r.created_at DESC,r.id`);
       return { counts: counts.rows, items: review.rows };
     }
     if (page2 === "receiving") {
@@ -45537,7 +45561,7 @@ var TOOL_DECLARATIONS = [
     description: "Preview and submit atomic physical counts or receipts under Inventory policy. Human approval, metadata, settings and review operations require authenticated host authority; actor fields in parameters grant no permission.",
     phase: 4,
     parametersSchema: { type: "object", properties: {
-      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
+      operation: { type: "string", enum: ["preview_count", "submit_count", "adjust", "approve_count", "reject_count", "refresh_refund_count", "preview_receipt", "confirm_receipt", "short_close", "edit_part", "save_settings", "import_legacy_settings", "resolve_review"] },
       lines: { type: "array", items: { type: "object", properties: { partId: { type: "string" }, counted: { type: "number" }, expected: { type: "number" }, ledgerRevision: { type: "string" }, quantity: { type: "number" } }, required: ["partId"] } },
       reason: { type: "string" },
       submissionKey: { type: "string" },

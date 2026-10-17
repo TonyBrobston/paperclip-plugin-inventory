@@ -104,6 +104,32 @@ integration("BigCommerce lifecycle", () => {
     await apply(snapshot);expect(await stock()).toMatchObject({onHand:18});
     expect(await apply(snapshot)).toEqual({duplicate:true});
   });
+  it("refreshes a rejected stale refund with audited human authorization and credits once", async()=>{
+    const human={type:'user' as const,id:'reviewer',companyId:RUN.companyId};
+    const rows=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(rows[0].revision),reason:'Require review',settings:{...rows[0].settings,approvalMode:'all'}});
+    await apply({shipped:2,observedAt:'2026-01-02T00:00:00Z'});
+    const observation={shipped:2,refunded:1,observedAt:'2026-01-03T00:00:00Z'};
+    const first=await apply(observation) as any;
+    const part=(await stock()).partId;
+    await appendEntry(target.db,{part:{kind:'id',id:part},entryType:'receipt',quantity:1,reference:'later',createdBy:'test',provenance:{source:'test'}});
+    await expect(executeNative(target.db,human,'approve_count',{countId:first.countId,reason:'Reviewed'})).rejects.toThrow(/Stale/);
+    await executeNative(target.db,human,'reject_count',{countId:first.countId,reason:'Stock moved; refresh'});
+    expect(await apply(observation)).toMatchObject({status:'rejected'});
+    await expect(executeNative(target.db,{type:'agent',id:'agent',companyId:RUN.companyId},'refresh_refund_count',{countId:first.countId,reason:'Refresh'})).rejects.toThrow(/human/);
+    const policy=await target.db.query<any>('SELECT settings,revision FROM operational_settings');
+    await executeNative(target.db,human,'save_settings',{revision:String(policy[0].revision),reason:'Allow routine adjustments',settings:{...policy[0].settings,approvalMode:'threshold',absoluteThreshold:1000,percentThreshold:1000}});
+    const refreshed=await executeNative(target.db,human,'refresh_refund_count',{countId:first.countId,reason:'Recheck returned parts'});
+    expect(refreshed).toMatchObject({status:'pending',duplicate:false});expect(refreshed.countId).not.toBe(first.countId);
+    expect(await executeNative(target.db,human,'refresh_refund_count',{countId:first.countId,reason:'Retry'})).toMatchObject({countId:refreshed.countId,duplicate:true});
+    expect(await apply(observation)).toMatchObject({countId:refreshed.countId,status:'pending'});
+    await expect(executeNative(target.db,human,'approve_count',{countId:refreshed.countId,reason:'Self approval'})).rejects.toThrow(/own count/);
+    await executeNative(target.db,{...human,id:'second-reviewer'},'approve_count',{countId:refreshed.countId,reason:'Verified fresh proposal'});
+    await apply(observation);expect(await stock()).toMatchObject({onHand:19});
+    expect(await apply(observation)).toEqual({duplicate:true});
+    const audit=await target.db.query<any>("SELECT * FROM operational_audit WHERE operation='refresh_refund_count'");
+    expect(audit).toHaveLength(1);expect(audit[0].actor.id).toBe(human.id);expect(audit[0].after_value.countId).toBe(refreshed.countId);
+  });
   it("releases cancellations and ignores older placed snapshots", async () => {
     await apply({ cancelled: true, observedAt: "2026-01-02T00:00:00Z" });
     expect(await apply()).toEqual({ stale: true });

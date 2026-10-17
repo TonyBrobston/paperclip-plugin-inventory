@@ -292,12 +292,22 @@ function CountDecisions({ counts, busy, decide }) {
         /* @__PURE__ */ jsx(Field, { name: "Decision reason", children: /* @__PURE__ */ jsx("input", { name: "reason", required: true }) }),
         /* @__PURE__ */ jsx("button", { value: "approve_count", disabled: busy, children: "Approve batch" }),
         /* @__PURE__ */ jsx("button", { value: "reject_count", disabled: busy, children: "Reject batch" })
-      ] }) : /* @__PURE__ */ jsxs("p", { children: [
-        c.decided_by?.id,
-        " \xB7 ",
-        c.decided_at,
-        " \xB7 ",
-        c.decision_reason
+      ] }) : /* @__PURE__ */ jsxs(Fragment, { children: [
+        /* @__PURE__ */ jsxs("p", { children: [
+          c.decided_by?.id,
+          " \xB7 ",
+          c.decided_at,
+          " \xB7 ",
+          c.decision_reason
+        ] }),
+        c.status === "rejected" && c.submission_key?.startsWith('["bc-refund",') && /* @__PURE__ */ jsxs("form", { onSubmit: (e) => {
+          e.preventDefault();
+          const f = new FormData(e.currentTarget);
+          decide("refresh_refund_count", { countId: c.id, reason: f.get("reason") });
+        }, children: [
+          /* @__PURE__ */ jsx(Field, { name: "Refresh reason", children: /* @__PURE__ */ jsx("input", { name: "reason", required: true }) }),
+          /* @__PURE__ */ jsx("button", { disabled: busy, children: "Refresh refund for approval" })
+        ] })
       ] })
     ] }, c.id))
   ] });
