@@ -24,7 +24,29 @@ var CONFIG_KEYS = {
    * Which vendors a business buys from is a deployment setting, so it comes
    * from config. The parser modules themselves ship with the plugin.
    */
-  enabledVendors: "enabledVendors"
+  enabledVendors: "enabledVendors",
+  /**
+   * The private config repository holding `bom/`, as `owner/name`.
+   *
+   * Which repository is a deployment setting, so it comes from config rather
+   * than from this code: the plugin is reusable and another business's BOMs
+   * live somewhere else entirely.
+   */
+  configRepo: "configRepo",
+  /** Branch to read BOMs from. Blank means the repository's default branch. */
+  configRepoBranch: "configRepoBranch",
+  /**
+   * Secret ref holding a GitHub token with read access to that repository.
+   *
+   * A ref rather than a string for the same reason as the database URL: the
+   * BOM files are private, and a token in plugin config is a token in a
+   * database row and in every settings API response.
+   */
+  configRepoToken: "configRepoToken",
+  /** BigCommerce store hash, used to resolve a BOM's catalog key. */
+  bigcommerceStoreHash: "bigcommerceStoreHash",
+  /** Secret ref holding a BigCommerce API token with product read access. */
+  bigcommerceToken: "bigcommerceToken"
 };
 var DEFAULT_DATABASE_SCHEMA = "inventory";
 var SCHEMA_NAME_PATTERN = "^[a-z_][a-z0-9_]{0,62}$";
@@ -163,13 +185,25 @@ var TOOL_DECLARATIONS = [
       properties: {
         productSku: {
           type: "string",
-          description: "The BigCommerce SKU of the product sold.",
+          description: "The product's catalog key: its BigCommerce variant SKU, or product-<id> for a product whose variants carry no SKU. Most products in this catalog are the second kind.",
           minLength: 1
         },
         options: {
           type: "array",
-          description: "Selected BigCommerce option names, which may add their own BOM lines.",
-          items: { type: "string" }
+          description: 'The option values the customer chose, as "option name: value" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. Every option name declared by the BOM requires exactly one selected value, including explicit no-parts values. Missing or conflicting selections refuse the sale. Options absent from the BOM are ignored and reported back.',
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  option: { type: "string", minLength: 1 },
+                  value: { type: "string", minLength: 1 }
+                },
+                required: ["option", "value"]
+              }
+            ]
+          }
         },
         qty: POSITIVE_QTY,
         reference: {
@@ -267,7 +301,7 @@ var TOOL_DECLARATIONS = [
   {
     name: "sync_boms",
     displayName: "Sync BOMs",
-    description: "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists and every SKU exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part.",
+    description: "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists, and that every catalog key and option value exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part. A changed quantity becomes a new version; what past sales consumed never changes. Draft BOMs \u2014 documented quantities whose part mappings are not confirmed yet \u2014 are reported and held, never imported.",
     phase: 5,
     parametersSchema: {
       type: "object",
@@ -349,6 +383,40 @@ var manifest = {
         type: "object",
         format: "secret-ref",
         title: "Google service-account JSON key",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"]
+      },
+      [CONFIG_KEYS.configRepo]: {
+        type: "string",
+        title: "Private config repository (optional until BOM sync)",
+        description: "The repository holding bom/, as owner/name. Copy it from private deployment settings; the repository name belongs in config, never in public code.",
+        pattern: "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+      },
+      [CONFIG_KEYS.configRepoBranch]: {
+        type: "string",
+        title: "Config repository branch (optional)",
+        description: "Leave blank to read the repository's default branch.",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$"
+      },
+      [CONFIG_KEYS.configRepoToken]: {
+        type: "object",
+        format: "secret-ref",
+        title: "GitHub token for the config repository",
+        description: "Save a GitHub token with read access to that repository as a Paperclip secret and pick it here. BOM files are private business data; the plugin only reads them.",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"]
+      },
+      [CONFIG_KEYS.bigcommerceStoreHash]: {
+        type: "string",
+        title: "BigCommerce store hash (optional until BOM sync)",
+        description: "Used to check that a BOM's catalog key and option values exist in the store before the BOM is accepted. A BOM keyed on something the store does not have consumes nothing on every sale.",
+        pattern: "^[a-z0-9]{5,30}$"
+      },
+      [CONFIG_KEYS.bigcommerceToken]: {
+        type: "object",
+        format: "secret-ref",
+        title: "BigCommerce API token (products: read-only)",
+        description: "A token with read access to products. BOM sync only reads the catalog with it.",
         properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
         required: ["type", "secretId"]
       },

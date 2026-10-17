@@ -43,6 +43,28 @@ export const CONFIG_KEYS = {
    * from config. The parser modules themselves ship with the plugin.
    */
   enabledVendors: "enabledVendors",
+  /**
+   * The private config repository holding `bom/`, as `owner/name`.
+   *
+   * Which repository is a deployment setting, so it comes from config rather
+   * than from this code: the plugin is reusable and another business's BOMs
+   * live somewhere else entirely.
+   */
+  configRepo: "configRepo",
+  /** Branch to read BOMs from. Blank means the repository's default branch. */
+  configRepoBranch: "configRepoBranch",
+  /**
+   * Secret ref holding a GitHub token with read access to that repository.
+   *
+   * A ref rather than a string for the same reason as the database URL: the
+   * BOM files are private, and a token in plugin config is a token in a
+   * database row and in every settings API response.
+   */
+  configRepoToken: "configRepoToken",
+  /** BigCommerce store hash, used to resolve a BOM's catalog key. */
+  bigcommerceStoreHash: "bigcommerceStoreHash",
+  /** Secret ref holding a BigCommerce API token with product read access. */
+  bigcommerceToken: "bigcommerceToken",
 } as const;
 
 /** Used when `databaseSchema` is left blank, which is the normal case. */

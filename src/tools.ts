@@ -164,14 +164,27 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
       properties: {
         productSku: {
           type: "string",
-          description: "The BigCommerce SKU of the product sold.",
+          description:
+            "The product's catalog key: its BigCommerce variant SKU, or product-<id> for a product whose variants carry no SKU. Most products in this catalog are the second kind.",
           minLength: 1,
         },
         options: {
           type: "array",
           description:
-            "Selected BigCommerce option names, which may add their own BOM lines.",
-          items: { type: "string" },
+            "The option values the customer chose, as \"option name: value\" or { option, value }. The value is required, not just the name: one option can mean a different part per value, so a name alone cannot say which to consume. Every option name declared by the BOM requires exactly one selected value, including explicit no-parts values. Missing or conflicting selections refuse the sale. Options absent from the BOM are ignored and reported back.",
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  option: { type: "string", minLength: 1 },
+                  value: { type: "string", minLength: 1 },
+                },
+                required: ["option", "value"],
+              },
+            ],
+          },
         },
         qty: POSITIVE_QTY,
         reference: {
@@ -278,7 +291,7 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     name: "sync_boms",
     displayName: "Sync BOMs",
     description:
-      "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists and every SKU exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part.",
+      "Read the BOM files from the config repository into versioned BOM records. Validates that every part reference exists, and that every catalog key and option value exists in BigCommerce, and fails loudly rather than importing a BOM that would silently consume the wrong part. A changed quantity becomes a new version; what past sales consumed never changes. Draft BOMs — documented quantities whose part mappings are not confirmed yet — are reported and held, never imported.",
     phase: 5,
     parametersSchema: {
       type: "object",

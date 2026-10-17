@@ -150,6 +150,7 @@ integration("the ledger", () => {
         "0009_intake",
         "0010_review_disposition",
         "0011_sheet_sync",
+        "0012_bom_catalog_keys",
       ]);
     });
   });
@@ -869,29 +870,30 @@ integration("the ledger", () => {
       const partId = await insertPart(t, "vendor-a", "part-099");
       const bom = await exec(
         t,
-        "INSERT INTO boms (product_sku, version) VALUES ('KIT-1', 1) RETURNING id",
+        "INSERT INTO boms (catalog_key, catalog_key_kind, version, content_hash) VALUES ('KIT-1', 'variant_sku', 1, 'hash-1') RETURNING id",
       );
       const bomId = bom[0]!.id;
-      const line = (option: string | null) =>
+      const line = (value: string | null) =>
         exec(
           t,
-          `INSERT INTO bom_lines (bom_id, bigcommerce_option, part_id, quantity_per_unit)
-           VALUES ($1, $2, $3, 4)`,
-          [bomId, option, partId],
+          `INSERT INTO bom_lines (bom_id, option_name, option_value, part_id, quantity_per_unit,
+                                  customer_description)
+           VALUES ($1, $2, $3, $4, 4, 'A fastener')`,
+          [bomId, value === null ? null : "Colour", value, partId],
         );
-      await line("Colour Black");
-      await line("Colour White");
+      await line("Black");
+      await line("White");
       await line(null);
       // Twice in the same place is still a mistake.
-      await expect(line("Colour Black")).rejects.toMatchObject({ code: "23505" });
+      await expect(line("Black")).rejects.toMatchObject({ code: "23505" });
     });
 
     it("keeps BOM versions distinct per product", async () => {
-      await exec(t, "INSERT INTO boms (product_sku, version) VALUES ('KIT-1', 1)");
+      await exec(t, "INSERT INTO boms (catalog_key, catalog_key_kind, version, content_hash) VALUES ('KIT-1', 'variant_sku', 1, 'h1')");
       await expect(
-        exec(t, "INSERT INTO boms (product_sku, version) VALUES ('KIT-1', 1)"),
+        exec(t, "INSERT INTO boms (catalog_key, catalog_key_kind, version, content_hash) VALUES ('KIT-1', 'variant_sku', 1, 'h1')"),
       ).rejects.toMatchObject({ code: "23505" });
-      await exec(t, "INSERT INTO boms (product_sku, version) VALUES ('KIT-1', 2)");
+      await exec(t, "INSERT INTO boms (catalog_key, catalog_key_kind, version, content_hash) VALUES ('KIT-1', 'variant_sku', 2, 'h2')");
     });
 
     it("stores one row per sync cursor", async () => {
