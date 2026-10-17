@@ -88,7 +88,10 @@ export async function submitOrderEmail(ctx: PluginContext, raw: unknown, run: To
   catch { reasons.push('Agent extraction is invalid or incomplete'); }
   if (parser) {
     try { verifier = parser.parse(rawText); reasons.push(...reconcile(verifier)); }
-    catch { reasons.push('Vendor parser could not safely read this email layout'); }
+    // A parser's own refusal says which layout or field defeated it, and that
+    // is the first thing a reviewer needs; only unexpected failures fall back
+    // to the generic wording.
+    catch (error) { reasons.push(error instanceof InputError ? error.message : 'Vendor parser could not safely read this email layout'); }
     if (agent && verifier) reasons.push(...disagreements(agent, verifier));
   } else if (agent) {
     const second = independent(input, agent);

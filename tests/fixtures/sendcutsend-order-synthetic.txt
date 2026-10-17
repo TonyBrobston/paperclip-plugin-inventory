@@ -1,0 +1,23 @@
+SendCutSend Order SX00A000 Confirmed
+
+ORDER SX00A000
+
+Thank you for your order!
+
+Hi Sample,
+
+We've received your order. We'll be sending you a tracking link shortly so you can follow your order every step of the way.
+
+VIEW MY ORDER http://example.invalid/ls/click?upn=u001.SYNTHETICTRACKINGTOKEN0000
+
+You can email us anytime if you have questions or changes to your order.
+
+Thank you!
+
+The SendCutSend Team
+
+support@sendcutsend.com
+
+Visit Store http://example.invalid/ls/click?upn=u001.SYNTHETICSTORETOKEN0000
+
+If you have any questions, reply to this email or contact us at support@sendcutsend.com

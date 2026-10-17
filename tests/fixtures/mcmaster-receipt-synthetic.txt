@@ -1,0 +1,55 @@
+| |
+
+| |
+| |
+| 000-000-0000 000-000-0000 (fax) sales@example.invalid[](sales@example.invalid) |
+
+| Receipt |
+
+| |
+
+| |
+| Billed to ATTENTION: SAMPLE PERSON SAMPLE SHOP 100 EXAMPLE STREET TESTVILLE ZZ 00000 |
+
+| |
+
+| |
+| Purchase Order | 1014ASAMPLE |
+| Paid | $14.72 |
+| Invoice | 00000000 |
+| Invoice Date | 10/14/26 |
+
+| |
+| Shipped to Sample Shop 100 Example Street Testville ZZ 00000 |
+
+| |
+| Information About Your Payment |
+| Credit Card Date Name on Card | Visa Ending- 0000 10/15/26 Sample Person |
+| Your Account | 000000000 |
+
+| Sample Person placed this order. |
+
+| |
+| Line | | Product | Ordered | Shipped | Balance | Price | Total |
+|---|---|---|---|---|---|---|---|
+| 1 | 00000A100[](https://www.mcmaster.com/nav/enter.asp?partnum=00000A100) | Synthetic Stainless Steel Hex-Drive Flat Head Screw, M5 x 0.8 mm Thread Size, 25 mm Long, Packs of 50 | 1 Pack | 1 | 0 | 4.00 Per Pack | 4.00 |
+| 2 | 00000A200[](https://www.mcmaster.com/nav/enter.asp?partnum=00000A200) | Synthetic Stainless Steel Low-Profile Socket Head Screw with Hex Drive, 1/4"-20 Thread Size, 5/8" Long, Packs of 10 | 1 Pack | 1 | 0 | 2.50 Per Pack | 2.50 |
+| 3 | 00000A300[](https://www.mcmaster.com/nav/enter.asp?partnum=00000A300) | Synthetic Stainless Steel Low-Profile Socket Head Screw with Hex Drive, 1/4"-20 Thread Size, 1" Long, Packs of 25 | 2 Pack | 2 | 0 | 1.25 Per Pack | 2.50 |
+
+| |
+
+| | |
+| Merchandise | 9.00 |
+| Sales Tax | 0.72 |
+| Shipping | 5.00 |
+| Total | $14.72 |
+| Payment Received 10/15/26 | (14.72) |
+| Balance Due | $0.00 |
+
+| |
+| Packing List | Shipped | Weight | Carrier | Tracking |
+|---|---|---|---|---|
+| 0000000-02 | 10/14/2026 | 1 lb | UPS | 1Z0000000000000000 |
+| 0000000-01 | 10/14/2026 | 1 lb | UPS | 1Z0000000000000001 |
+
+| Federal ID 00-0000000 |

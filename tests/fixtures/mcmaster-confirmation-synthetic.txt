@@ -1,0 +1,40 @@
+Thank you for your order.
+
+| |
+
+| |
+| |
+
+| # Confirmation |
+
+| |
+
+| |
+| Delivery address Sample Shop 100 Example Street Testville ZZ 00000 | Delivery method UPS Ground | Order date 10/14/2026 |
+| Payment method Visa (****0000) | Placed by Sample Person |
+| | McMaster-Carr number 0000000 |
+
+| |
+
+| |
+| 1014ASAMPLE[](https://www.mcmaster.com/order-history/order/000000000000000000000000) |
+| Delivers Oct 15, 2-4 pm |
+| 1 | Synthetic Stainless Steel Hex-Drive Flat Head Screw M5 x 0.8 mm Thread Size, 25 mm Long 00000A100[](https://www.mcmaster.com/#00000A100) | 1 pack of 50 | 4.00 pack | $4.00 |
+| Delivers Oct 16, 2-4 pm |
+| 2 | Synthetic Stainless Steel Low-Profile Socket Head Screw with Hex Drive, 1/4"-20 Thread Size, 5/8" Long 00000A200[](https://www.mcmaster.com/#00000A200) | 1 pack of 10 | 2.50 pack | $2.50 |
+| Delivers Oct 15, 2-4 pm |
+| 3 | Synthetic Stainless Steel Low-Profile Socket Head Screw with Hex Drive, 1/4"-20 Thread Size, 1" Long 00000A300[](https://www.mcmaster.com/#00000A300) | 2 pack of 25 | 1.25 pack | $2.50 |
+
+| |
+
+| | |
+| | Merchandise | 9.00 |
+| | Shipping | 5.00 |
+| | Tax | 0.72 |
+| | Total | $14.72 |
+| |
+
+| Your order is subject only to our terms and conditions, available at www.mcmaster.com[](https://mcmaster.com) or from our Sales Department. |
+
+| |
+| Phone: (000) 000-0000 | Email: sales@example.invalid |

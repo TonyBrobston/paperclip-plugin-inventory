@@ -51,16 +51,45 @@ must agree. Tax and shipping are excluded from subtotal reconciliation.
 
 ## Parser status and fixture provenance
 
-**Vendor format validation is pending authorized Gmail access.** The McMaster
-and SendCutSend modules currently handle only conservative synthetic text tables.
-These fixtures were invented for tests; they are not claimed to reproduce actual
-vendor emails. Unrecognised layouts fail closed to review. Do not treat these
-parsers as production ready until 2–3 authorized samples per vendor have been
-inspected and format-preserving, fully synthetic fixtures added.
+Three McMaster and three SendCutSend order emails were inspected under
+authorized Gmail access. The fixtures in `tests/fixtures` reproduce the
+structure, labels and unit wording of those messages with every name, address,
+order number, part number and price replaced by invented values. What was found:
 
-Only invented names, addresses, order numbers, part numbers and prices appear
-in this repository. No original emails or deployment settings belong here.
-Original source text is persisted only in the configured inventory database.
+| Layout | Order number | Line items | Reconcilable subtotal |
+|---|---|---|---|
+| McMaster **confirmation** | own cell, linked into order history | `1 pack of 50` at `4.00 pack` | `Merchandise` |
+| McMaster **receipt** | `Purchase Order` field | `1 Pack` at `4.00 Per Pack` | `Merchandise` |
+| SendCutSend **order** | `ORDER <number>` | **none in the body** | none |
+
+Three consequences are worth stating plainly, because each contradicts what the
+first draft of these parsers assumed:
+
+- **Neither McMaster layout prints anything resembling `Order Number:`,** and a
+  receipt never spells "McMaster-Carr" in its body — only the `mcmaster.com`
+  domain, which is why vendor matching keys on the domain as well as the name.
+- **`Merchandise` is the subtotal that reconciles, not `Total`.** Total includes
+  shipping and tax, which are not line items and must never reach the ledger as
+  stock value.
+- **SendCutSend order emails contain no line items at all.** The itemised
+  invoice is a PDF attachment, so that parser reads the order number and then
+  refuses, which routes the email to review naming the attachment as the
+  reason. Recording stock from one needs the invoice read and reviewed through
+  `accept_with_corrections`.
+
+**Quantity is the vendor's purchase unit, not a piece count.** A pack of 50
+screws is quantity 1 at the pack price, because that is what the vendor charges
+for and what reconciles exactly against the printed figures. Dividing a pack
+price by its pack size invents precision the email does not contain — a $12.70
+pack of 3 has no exact per-piece price — and would turn a sound order into a
+false reconciliation failure. The pack size is preserved in the line
+description. **A phase that consumes parts per piece must expand packs
+deliberately rather than assume the ledger counts pieces.**
+
+Unrecognised layouts still fail closed to review. Only invented names,
+addresses, order numbers, part numbers and prices appear in this repository; no
+original email text does. Original source text is persisted only in the
+configured inventory database.
 
 Vendor modules implement `matches` and `parse`; register a new module in
 `src/parsers/index.ts` and add synthetic fixtures. Storage and verification code

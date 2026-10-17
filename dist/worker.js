@@ -42978,7 +42978,7 @@ function reconcile(x) {
 
 // src/parsers/table.ts
 function parseTable(raw) {
-  const orderNumber = raw.match(/^Order(?: Number| #| number)?\s*:\s*([\w-]+)\s*$/mi)?.[1];
+  const orderNumber = raw.match(/^Order(?:\s+Number\s*:|\s*#\s*:?|\s*:)\s*([\w-]+)\s*$/mi)?.[1];
   const orderDate = raw.match(/^(?:Order Date|Date)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/mi)?.[1];
   const subtotal = raw.match(/^Subtotal\s*:?\s*\$?([\d,]+\.\d{2,4})\s*$/mi)?.[1];
   const rows = raw.split(/\r?\n/);
@@ -42988,26 +42988,135 @@ function parseTable(raw) {
   for (const row of rows.slice(start + 1)) {
     if (!row.trim()) continue;
     if (/^Subtotal\b/i.test(row.trim())) break;
-    const cells = row.split("|").map((x) => x.trim());
-    if (cells.length !== 5) throw new InputError("Unrecognised vendor line item; independent review required.");
+    const cells2 = row.split("|").map((x) => x.trim());
+    if (cells2.length !== 5) throw new InputError("Unrecognised vendor line item; independent review required.");
     const money = (s) => /^\$?[\d,]+\.\d{2,4}$/.test(s) ? Number(s.replace(/[$,]/g, "")) : NaN;
-    lines.push({ vendorPartNumber: cells[0], description: cells[1], quantity: Number(cells[2]), unitPrice: money(cells[3]), lineTotal: money(cells[4]) });
+    lines.push({ vendorPartNumber: cells2[0], description: cells2[1], quantity: Number(cells2[2]), unitPrice: money(cells2[3]), lineTotal: money(cells2[4]) });
   }
   return extraction({ orderNumber, orderDate, subtotal: subtotal ? Number(subtotal.replace(/,/g, "")) : void 0, lines });
 }
 
 // src/parsers/mcmaster.ts
+function cells(row) {
+  const trimmed = row.trim();
+  if (trimmed.length < 2 || !trimmed.startsWith("|") || !trimmed.endsWith("|")) return void 0;
+  return trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+}
+function amount(raw, label2) {
+  const matched = /^\$?([\d,]+\.\d{2,4})$/.exec(raw.trim());
+  if (!matched) throw new InputError(`Unreadable McMaster ${label2} "${raw.trim()}"; independent review required.`);
+  return Number(matched[1].replace(/,/g, ""));
+}
+function unitPrice(raw) {
+  const matched = /^(\$?[\d,]+\.\d{2,4})(?:\s+(?:per\s+)?(?:pack|each))?$/i.exec(raw.trim());
+  if (!matched) throw new InputError(`Unreadable McMaster unit price "${raw.trim()}"; independent review required.`);
+  return amount(matched[1], "unit price");
+}
+function ordered(raw) {
+  const trimmed = raw.trim();
+  const pack = /^(\d+)\s+packs?\s+of\s+(\d+)$/i.exec(trimmed);
+  if (pack) return { quantity: Number(pack[1]), packSize: Number(pack[2]) };
+  const plain = /^(\d+)(?:\s+(?:packs?|each))?$/i.exec(trimmed);
+  if (plain) return { quantity: Number(plain[1]) };
+  throw new InputError(`Unreadable McMaster quantity "${trimmed}"; independent review required.`);
+}
+function partLink(raw) {
+  const matched = /^(.*?)\s*([0-9A-Za-z]+)\[\]\([^)]*\)$/.exec(raw.trim());
+  return matched ? { vendorPartNumber: matched[2], description: matched[1].trim() } : void 0;
+}
+function describe3(description, packSize) {
+  const text3 = packSize === void 0 ? description : `${description} (pack of ${packSize})`.trim();
+  return text3 ? text3 : void 0;
+}
+function merchandise(raw) {
+  const matched = /^\|(?:\s*\|)*\s*Merchandise\s*\|\s*(\$?[\d,]+\.\d{2,4})\s*\|$/mi.exec(raw);
+  return matched ? amount(matched[1], "merchandise subtotal") : void 0;
+}
+function isConfirmation(raw) {
+  return /\[\]\(https?:\/\/[^)]*mcmaster\.com\/order-history\/order\/[^)]*\)/i.test(raw);
+}
+function receiptHeader(rows) {
+  return rows.findIndex((row) => {
+    const row8 = cells(row);
+    return !!row8 && row8.length === 8 && /^Line$/i.test(row8[0]) && /^Product$/i.test(row8[2]) && /^Ordered$/i.test(row8[3]) && /^Price$/i.test(row8[6]) && /^Total$/i.test(row8[7]);
+  });
+}
+function parseConfirmation(raw) {
+  const orderNumber = /^\|\s*([0-9A-Za-z][0-9A-Za-z-]*)\[\]\(https?:\/\/[^)]*mcmaster\.com\/order-history\/order\/[^)]*\)\s*\|$/mi.exec(raw)?.[1];
+  const date5 = /\bOrder date\s+(\d{1,2})\/(\d{1,2})\/(\d{4})\b/i.exec(raw);
+  const orderDate = date5 ? `${date5[3]}-${date5[1].padStart(2, "0")}-${date5[2].padStart(2, "0")}` : void 0;
+  const lines = [];
+  for (const row of raw.split(/\r?\n/)) {
+    const cell = cells(row);
+    if (!cell || cell.length !== 5 || !/^\d+$/.test(cell[0])) continue;
+    const part = partLink(cell[1]);
+    if (!part) continue;
+    const { quantity, packSize } = ordered(cell[2]);
+    lines.push({
+      vendorPartNumber: part.vendorPartNumber,
+      quantity,
+      unitPrice: unitPrice(cell[3]),
+      lineTotal: amount(cell[4], "line total"),
+      ...describe3(part.description, packSize) ? { description: describe3(part.description, packSize) } : {}
+    });
+  }
+  if (!lines.length) throw new InputError("No McMaster confirmation line items were recognised; independent review required.");
+  return extraction({ orderNumber, orderDate, subtotal: merchandise(raw), lines });
+}
+function parseReceipt(raw, header) {
+  const rows = raw.split(/\r?\n/);
+  const orderNumber = /^\|\s*Purchase Order\s*\|\s*([0-9A-Za-z][0-9A-Za-z-]*)\s*\|$/mi.exec(raw)?.[1];
+  const lines = [];
+  for (const row of rows.slice(header + 1)) {
+    const cell = cells(row);
+    if (!cell || cell.length !== 8 || !/^\d+$/.test(cell[0])) continue;
+    const part = partLink(cell[1]);
+    if (!part) continue;
+    const { quantity, packSize } = ordered(cell[3]);
+    const stated = /\bpacks?\s+of\s+\d+\b/i.test(cell[2]);
+    const described = describe3(cell[2], stated ? void 0 : packSize);
+    lines.push({
+      vendorPartNumber: part.vendorPartNumber,
+      quantity,
+      unitPrice: unitPrice(cell[6]),
+      lineTotal: amount(cell[7], "line total"),
+      ...described ? { description: described } : {}
+    });
+  }
+  if (!lines.length) throw new InputError("No McMaster receipt line items were recognised; independent review required.");
+  return extraction({ orderNumber, subtotal: merchandise(raw), lines });
+}
+function parseMcMaster(raw) {
+  const header = receiptHeader(raw.split(/\r?\n/));
+  if (header >= 0) return parseReceipt(raw, header);
+  if (isConfirmation(raw)) return parseConfirmation(raw);
+  return parseTable(raw);
+}
 var mcmaster = {
   vendor: "mcmaster",
-  matches: (email3) => /\bMcMaster-Carr\b/i.test(email3),
-  parse: parseTable
+  matches: (email3) => /\bMcMaster-Carr\b/i.test(email3) || /\bmcmaster\.com\b/i.test(email3),
+  parse: parseMcMaster
 };
 
 // src/parsers/sendcutsend.ts
+function sendCutSendOrderNumber(raw) {
+  return /^ORDER\s+([0-9A-Za-z][0-9A-Za-z-]*)\s*$/mi.exec(raw)?.[1] ?? /\bSendCutSend\s+Order\s+([0-9A-Za-z][0-9A-Za-z-]*)\b/i.exec(raw)?.[1];
+}
+function parseSendCutSend(raw) {
+  try {
+    return parseTable(raw);
+  } catch (error62) {
+    const orderNumber = sendCutSendOrderNumber(raw);
+    if (orderNumber) {
+      throw new InputError(`SendCutSend order ${orderNumber} prints no line items in the email body; its itemised invoice is a PDF attachment, so quantities and prices need independent extraction and review before they can affect stock.`);
+    }
+    throw error62;
+  }
+}
 var sendcutsend = {
   vendor: "sendcutsend",
-  matches: (email3) => /\bSendCutSend\b/i.test(email3),
-  parse: parseTable
+  matches: (email3) => /\bSendCutSend\b/i.test(email3) || /\bsendcutsend\.com\b/i.test(email3),
+  parse: parseSendCutSend
 };
 
 // src/parsers/index.ts
@@ -43103,8 +43212,8 @@ async function submitOrderEmail(ctx, raw, run) {
     try {
       verifier = parser.parse(rawText);
       reasons.push(...reconcile(verifier));
-    } catch {
-      reasons.push("Vendor parser could not safely read this email layout");
+    } catch (error62) {
+      reasons.push(error62 instanceof InputError ? error62.message : "Vendor parser could not safely read this email layout");
     }
     if (agent && verifier) reasons.push(...disagreements(agent, verifier));
   } else if (agent) {

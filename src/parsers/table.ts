@@ -2,7 +2,7 @@
 import { extraction } from '../extraction.js';
 import { InputError } from '../errors.js';
 export function parseTable(raw: string) {
-  const orderNumber = raw.match(/^Order(?: Number| #| number)?\s*:\s*([\w-]+)\s*$/mi)?.[1];
+  const orderNumber = raw.match(/^Order(?:\s+Number\s*:|\s*#\s*:?|\s*:)\s*([\w-]+)\s*$/mi)?.[1];
   const orderDate = raw.match(/^(?:Order Date|Date)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/mi)?.[1];
   const subtotal = raw.match(/^Subtotal\s*:?\s*\$?([\d,]+\.\d{2,4})\s*$/mi)?.[1];
   const rows = raw.split(/\r?\n/);

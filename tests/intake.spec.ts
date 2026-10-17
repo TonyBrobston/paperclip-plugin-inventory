@@ -142,6 +142,46 @@ integration('verified email intake through the host harness', () => {
     expect((await submit()).error).toBe('The inventory request failed.');
     for (const table of ['parts','orders','order_lines','ledger_entries','email_intake']) expect(await count(table),table).toBe(0);
   });
+  /**
+   * The layouts that actually arrive, end to end. These three cases are the
+   * reason this phase needed authorized samples: the invented fixture above
+   * exercises the verification core, but only these prove an email a vendor
+   * really sends can reach — or be kept out of — the ledger.
+   */
+  const layout = (name: string) => readFileSync(new URL(`./fixtures/${name}-synthetic.txt`, import.meta.url), 'utf8');
+  it.each(['mcmaster-confirmation', 'mcmaster-receipt'])('records a real %s layout against its Merchandise subtotal', async name => {
+    const text = layout(name);
+    const parsed = selectParser(text)!.parse(text);
+    const result = await call('submit_order_email', {messageId:`real-${name}`, rawText:text, agentExtraction:parsed});
+    expect(result.error).toBeUndefined();
+    expect(result.data?.status).toBe('recorded');
+    expect(await count('order_lines')).toBe(3);
+    // Packs ordered, at the pack price: 1 + 1 + 2 purchase units on order.
+    const rows = await exec(t,'SELECT on_hand_delta,on_order_delta FROM ledger_entries ORDER BY on_order_delta');
+    expect(rows.map(r=>Number(r.on_order_delta))).toEqual([1,1,2]);
+    expect(rows.map(r=>Number(r.on_hand_delta))).toEqual([0,0,0]);
+    const order = await exec(t,'SELECT vendor,vendor_order_number,subtotal::float8 AS subtotal FROM orders');
+    expect(order[0]).toMatchObject({vendor:'mcmaster', vendor_order_number:'1014ASAMPLE', subtotal:9});
+  });
+  it('holds a real SendCutSend order email in review and records why', async () => {
+    const text = layout('sendcutsend-order');
+    const result = await call('submit_order_email', {messageId:'real-sendcutsend', rawText:text, agentExtraction:{orderNumber:'SX00A000', subtotal:9, lines:[{vendorPartNumber:'SX-PART-1', quantity:3, unitPrice:3}]}});
+    expect(result.data?.status).toBe('open');
+    expect(await count('ledger_entries')).toBe(0);
+    expect(await count('orders')).toBe(0);
+    const listed = await call('list_review_queue',{});
+    expect(listed.data?.items[0].vendor).toBe('sendcutsend');
+    // The reviewer is told the invoice is an attachment, not just that a
+    // layout was "unrecognised".
+    expect(listed.data?.items[0].reason).toMatch(/no line items in the email body/);
+    expect(listed.data?.items[0].reason).toMatch(/PDF attachment/);
+  });
+  it('still refuses a real layout whose printed subtotal was tampered with', async () => {
+    const text = layout('mcmaster-confirmation').replace('| | Merchandise | 9.00 |', '| | Merchandise | 9.50 |');
+    const result = await call('submit_order_email', {messageId:'tampered', rawText:text, agentExtraction:selectParser(text)!.parse(text)});
+    expect(result.data?.status).toBe('open');
+    expect(await count('ledger_entries')).toBe(0);
+  });
   it('receipts discharge purchases using the vendor order reference', async () => {
     await submit();
     await call('record_receipt',{partId:'mcmaster:synth-mc-a',quantity:4,reference:correct().orderNumber});
