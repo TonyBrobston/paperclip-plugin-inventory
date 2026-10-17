@@ -133,6 +133,49 @@ integration('Sheet sync against PostgreSQL', () => {
       expect(req.updateCells.rows[0].values.length).toBe(11);
     }
   });
+  it('preserves unassigned human settings and scratch cells while appending new parts', async () => {
+    await sync();
+    const managed = sheets.rows('Inventory')[1].values!.map(c => cellValue(c) ?? '');
+    const reorder = [...Array(11).fill(''), 5];
+    const scratch = [...Array(16).fill(''), 'scratch'];
+    sheets.setRows('Inventory', [INVENTORY_HEADERS, managed, reorder, scratch]);
+    await appendEntry(t.db, { part: { kind: 'vendor', vendor: 'vendor-a', vendorPartNumber: 'part-002', ref: 'vendor-a:part-002' }, entryType: 'receipt', quantity: 2, reference: 'new-part', provenance: { source: 'test' }, createdBy: 'test', createMissingPart: true });
+    await withCount(); await sync(); await sync();
+    expect(sheets.rows('Inventory')[2].values!.map(cellValue)).toEqual(reorder);
+    expect(sheets.rows('Inventory')[3].values!.map(cellValue)).toEqual(scratch);
+    expect(cellValue(sheets.rows('Inventory')[4].values![1])).toBe('vendor-a:part-002');
+    expect(await exec(t, 'SELECT * FROM part_sheet_settings')).toHaveLength(2);
+    expect(await counts()).toHaveLength(1);
+  });
+  it('rejects system values without a Part ID before writing', async () => {
+    await sync();
+    sheets.setRows('Inventory', [INVENTORY_HEADERS, ['', 'orphaned system value']]);
+    await expect(sync()).rejects.toThrow(/Inventory row 2 has system values but no Part ID/);
+    expect(sheets.batches).toHaveLength(1);
+  });
+  it('ignores cleared count inputs with protected status and retains durable deduplication', async () => {
+    await withCount(); await sync();
+    const status = sheets.rows('Adjustments')[1].values!.slice(6, 8).map(c => cellValue(c)!);
+    const cleared = [...Array(6).fill(''), ...status];
+    sheets.setRows('Adjustments', [ADJUSTMENT_HEADERS, cleared, countRow('count-002', 8)]);
+    await exec(t, "INSERT INTO review_queue(reason) VALUES ('Synthetic review')");
+    const result = await sync();
+    expect(result.openReviews).toBe(1); expect(result.countsProcessed).toBe(1);
+    expect(sheets.rows('Adjustments')[1].values!.map(cellValue)).toEqual(cleared);
+    expect(cellValue(sheets.rows('Inventory')[1].values![4])).toBe(8);
+    expect(sheets.rows('Needs Review')).toHaveLength(2);
+    sheets.setRows('Adjustments', [ADJUSTMENT_HEADERS, countRow(), countRow('count-002', 8)]);
+    expect((await sync()).countsReplayed).toBe(2);
+    expect(await onHand()).toBe(8); expect(await counts()).toHaveLength(2);
+    expect(await exec(t, "SELECT id FROM ledger_entries WHERE entry_type='adjustment'")).toHaveLength(2);
+  });
+  it.each([3, 4, 5])('identifies the row for invalid count input in column %i', async column => {
+    await withCount();
+    const row = countRow(); row[column] = column === 4 ? 'invalid timestamp' : '';
+    sheets.setRows('Adjustments', [ADJUSTMENT_HEADERS, row]);
+    await expect(sync()).rejects.toThrow(/Adjustments row 2/);
+    expect(await counts()).toHaveLength(0);
+  });
   it('applies a physical count once, repairs status after publish failure, and ignores forged processed status', async () => {
     await withCount();
     sheets.fail = true;

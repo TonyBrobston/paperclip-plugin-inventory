@@ -43416,7 +43416,7 @@ function parseCounts(rows) {
   const ids = /* @__PURE__ */ new Set();
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i] ?? [];
-    if (!populated(row)) continue;
+    if (!populated(row.slice(0, 6))) continue;
     validateInputCells(row.slice(0, 6), `Adjustments row ${i + 1}`);
     const cells2 = values(row);
     const id = text3(cells2[0], `Adjustments row ${i + 1} Count ID`, 100);
@@ -43426,9 +43426,9 @@ function parseCounts(rows) {
     if (!UUID2.test(partId)) throw new SheetError(`Adjustments row ${i + 1} requires the Inventory Part ID.`);
     const count = parseQuantity(cells2[2], { label: `Adjustments row ${i + 1} physical count` });
     if (count < 0) throw new SheetError("Physical counts cannot be negative.");
-    const countedAt = text3(cells2[4], "Counted at");
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(countedAt) || !Number.isFinite(Date.parse(countedAt))) throw new SheetError("Counted at must be an ISO timestamp with a time zone.");
-    counts.push({ row: i, id, partId, count, reason: text3(cells2[3], "Count reason"), countedAt, countedBy: text3(cells2[5], "Counted by") });
+    const countedAt = text3(cells2[4], `Adjustments row ${i + 1} Counted at`);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.test(countedAt) || !Number.isFinite(Date.parse(countedAt))) throw new SheetError(`Adjustments row ${i + 1} Counted at must be an ISO timestamp with a time zone.`);
+    counts.push({ row: i, id, partId, count, reason: text3(cells2[3], `Adjustments row ${i + 1} Count reason`), countedAt, countedBy: text3(cells2[5], `Adjustments row ${i + 1} Counted by`) });
   }
   return counts;
 }
@@ -43520,8 +43520,12 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
     const settings = /* @__PURE__ */ new Map();
     for (let i = 1; i < inventoryRows.length; i++) {
       const row = inventoryRows[i] ?? [];
-      if (!populated(row)) continue;
-      const id = text3(cellValue(row[0]), `Inventory row ${i + 1} Part ID`).toLowerCase();
+      const rawId = cellValue(row[0]);
+      if (rawId === void 0 || rawId === "") {
+        if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
+        continue;
+      }
+      const id = text3(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
       settings.set(id, settingsOf(row));
