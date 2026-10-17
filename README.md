@@ -11,7 +11,7 @@ parts, and gives agents the tools to keep it current: order emails in, sales
 out, a Google Sheet as the human-facing view, and a review queue for anything
 the plugin could not verify.
 
-**Status:** ledger, verified email intake, review resolution, `sync_sheet`, `sync_boms` and `record_sale` are implemented. The BigCommerce bridge — `get_sellable` and `reconcile_bigcommerce` — arrives in phase 6. See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) and [BOMs: the file format, versioning, and what reaches the public docs](docs/boms.md) before configuring either sync.
+**Status:** ledger, verified email intake, review resolution, `sync_sheet`, `sync_boms` and `record_sale` are implemented. The BigCommerce bridge implements `get_sellable` and agent-run `reconcile_bigcommerce`; see [bridge setup and recovery](docs/bigcommerce.md). See [Sheet setup, column ownership and physical counts](docs/sheet-sync.md) and [BOMs: the file format, versioning, and what reaches the public docs](docs/boms.md) before configuring either sync.
 
 ## The ledger
 

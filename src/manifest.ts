@@ -96,6 +96,12 @@ const manifest: PaperclipPluginManifestV1 = {
           "Used to check that a BOM's catalog key and option values exist in the store before the BOM is accepted. A BOM keyed on something the store does not have consumes nothing on every sale.",
         pattern: "^[a-z0-9]{5,30}$",
       },
+      bigcommerceBridgeToken: {
+        type: "object", format: "secret-ref", title: "BigCommerce bridge token (Orders read, Products modify)",
+        description: "Separate stock-write credential. Required for reconciliation and stock pushes; stored only in Paperclip secrets.",
+        properties: { type: { const: "secret_ref" }, secretId: { type: "string", minLength: 1 } },
+        required: ["type", "secretId"],
+      },
       [CONFIG_KEYS.bigcommerceToken]: {
         type: "object", format: "secret-ref", title: "BigCommerce API token (products: read-only)",
         description: "A token with read access to products. BOM sync only reads the catalog with it.",

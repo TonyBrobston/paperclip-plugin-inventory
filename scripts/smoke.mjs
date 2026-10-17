@@ -171,7 +171,7 @@ try {
    * tools must come back with something an operator can act on, through the
    * real bundle, rather than taking the worker down with them.
    */
-  const IMPLEMENTED = new Set(["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale"]);
+  const IMPLEMENTED = new Set(["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"]);
 
   for (const tool of manifest.tools) {
     const result = await send("executeTool", {

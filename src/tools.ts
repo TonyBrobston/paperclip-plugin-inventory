@@ -266,6 +266,8 @@ export const TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
           type: "string",
           description: "Omit to get every product with a BOM.",
         },
+        options: { type: "array", items: { type: "object", properties: { option: { type: "string" }, value: { type: "string" } }, required: ["option", "value"] }
+        },
       },
     },
   },
