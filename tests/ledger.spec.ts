@@ -151,6 +151,7 @@ integration("the ledger", () => {
         "0010_review_disposition",
         "0011_sheet_sync",
         "0012_bom_catalog_keys",
+        "0013_bigcommerce_bridge",
       ]);
     });
   });

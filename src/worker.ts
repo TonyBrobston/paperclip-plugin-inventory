@@ -12,6 +12,7 @@ import { closeAllDatabases } from "./db.js";
 import { OperatorFacingError } from "./errors.js";
 import { getStock, recordAdjustment, recordReceipt } from "./handlers.js";
 import { submitOrderEmail, listReviewQueue, resolveReviewItem } from "./intake.js";
+import { getSellable, reconcileBigcommerce, pushStock } from "./bridge.js";
 import { syncBoms } from "./bom-sync.js";
 import { recordSale } from "./sales.js";
 import { syncSheet } from "./sheet-sync.js";
@@ -101,7 +102,7 @@ export function toolError(
  * tool named here that still throws `NotImplementedError`, or one missing
  * from it that works, means the two have drifted.
  */
-export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale"] as const;
+export const IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"] as const;
 
 export async function dispatch(
   ctx: PluginContext,
@@ -110,6 +111,10 @@ export async function dispatch(
   runCtx: ToolRunContext,
 ): Promise<ToolResult> {
   switch (declaration.name) {
+    case "get_sellable":
+      return getSellable(ctx, params, runCtx);
+    case "reconcile_bigcommerce":
+      return reconcileBigcommerce(ctx, params, runCtx);
     case "sync_sheet":
       return syncSheet(ctx, params, runCtx);
     case "sync_boms":
@@ -146,7 +151,13 @@ const plugin = definePlugin({
         async (params: unknown, runCtx: ToolRunContext): Promise<ToolResult> => {
           try {
             const result = await dispatch(ctx, declaration, params, runCtx);
-            return { ...result, data: structured(result.data) };
+            const data = structured(result.data);
+            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_sheet", "sync_boms"].includes(declaration.name);
+            if (mutates && !(params as { dryRun?: boolean } | null)?.dryRun && !result.error) {
+              try { data.stockSync = await pushStock(ctx, runCtx); }
+              catch { data.stockSync = { pending: true, message: "Local change saved; stock push pending. Run reconcile_bigcommerce to retry." }; }
+            }
+            return { ...result, data };
           } catch (error) {
             return toolError(ctx, declaration.name, runCtx.companyId, error);
           }

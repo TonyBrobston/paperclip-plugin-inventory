@@ -38,7 +38,7 @@ describe("tool registration", () => {
     }
   });
 
-  it("says which phase an unimplemented tool is waiting on", async () => {
+  it("reports configuration needed by the sellable handler", async () => {
     const result = await harness.executeTool<{ error?: string }>(
       "get_sellable",
       {},
@@ -46,7 +46,8 @@ describe("tool registration", () => {
     );
     // A tool that is not built yet should read as "not built yet" rather than
     // as a crash, so an agent stops instead of retrying.
-    expect(result.error).toContain("phase 6");
+    expect(result.error).toBeTruthy();
+    expect(result.error).not.toContain("not implemented");
   });
 
   it("keeps IMPLEMENTED_TOOLS honest about which tools have a handler", async () => {
@@ -74,9 +75,9 @@ describe("tool registration", () => {
         expect(
           declaration.phase,
           `${declaration.name} works, so its phase should be one that has landed`,
-        ).toBeLessThanOrEqual(5);
+        ).toBeLessThanOrEqual(6);
       } else {
-        expect(declaration.phase).toBeGreaterThan(5);
+        expect(declaration.phase).toBeGreaterThan(6);
       }
     }
   });

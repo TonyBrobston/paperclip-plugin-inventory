@@ -1,8 +1,1267 @@
 var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;
+  }
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
 };
+
+// src/constants.ts
+var CONFIG_KEYS, DEFAULT_DATABASE_SCHEMA, SCHEMA_NAME_PATTERN, SUPPORTED_VENDORS, SETTINGS_PATH;
+var init_constants = __esm({
+  "src/constants.ts"() {
+    "use strict";
+    CONFIG_KEYS = {
+      /**
+       * Secret ref holding the PostgreSQL connection string.
+       *
+       * A ref rather than a string: the value carries a password, and a password
+       * in plugin config is a password in a database row and in every settings
+       * API response.
+       */
+      databaseUrl: "databaseUrl",
+      /**
+       * Schema the plugin owns inside that database.
+       *
+       * Configurable because this plugin is meant to be reusable: another
+       * deployment may already have an `inventory` schema, or may want the tables
+       * somewhere else entirely.
+       */
+      databaseSchema: "databaseSchema",
+      /**
+       * Vendors whose parsers are enabled for this company.
+       *
+       * Which vendors a business buys from is a deployment setting, so it comes
+       * from config. The parser modules themselves ship with the plugin.
+       */
+      enabledVendors: "enabledVendors",
+      /**
+       * The private config repository holding `bom/`, as `owner/name`.
+       *
+       * Which repository is a deployment setting, so it comes from config rather
+       * than from this code: the plugin is reusable and another business's BOMs
+       * live somewhere else entirely.
+       */
+      configRepo: "configRepo",
+      /** Branch to read BOMs from. Blank means the repository's default branch. */
+      configRepoBranch: "configRepoBranch",
+      /**
+       * Secret ref holding a GitHub token with read access to that repository.
+       *
+       * A ref rather than a string for the same reason as the database URL: the
+       * BOM files are private, and a token in plugin config is a token in a
+       * database row and in every settings API response.
+       */
+      configRepoToken: "configRepoToken",
+      /** BigCommerce store hash, used to resolve a BOM's catalog key. */
+      bigcommerceStoreHash: "bigcommerceStoreHash",
+      /** Secret ref holding a BigCommerce API token with product read access. */
+      bigcommerceToken: "bigcommerceToken"
+    };
+    DEFAULT_DATABASE_SCHEMA = "inventory";
+    SCHEMA_NAME_PATTERN = "^[a-z_][a-z0-9_]{0,62}$";
+    SUPPORTED_VENDORS = [
+      "mcmaster",
+      "sendcutsend",
+      "amazon",
+      "formlabs"
+    ];
+    SETTINGS_PATH = "Settings \u2192 Plugins \u2192 Inventory";
+  }
+});
+
+// src/errors.ts
+var OperatorFacingError, InputError, StorageError, LedgerError;
+var init_errors = __esm({
+  "src/errors.ts"() {
+    "use strict";
+    OperatorFacingError = class extends Error {
+      constructor(message2) {
+        super(message2);
+        this.name = new.target.name;
+      }
+    };
+    InputError = class extends OperatorFacingError {
+    };
+    StorageError = class extends OperatorFacingError {
+    };
+    LedgerError = class extends OperatorFacingError {
+    };
+  }
+});
+
+// src/config.ts
+function isSecretRefBinding(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && value.type === "secret_ref" && typeof value.secretId === "string" && value.secretId.length > 0;
+}
+function parseDatabaseSchema(value) {
+  if (value === void 0 || value === null || value === "") {
+    return DEFAULT_DATABASE_SCHEMA;
+  }
+  if (typeof value !== "string") {
+    throw new ConfigError("The database schema must be text, or left blank.");
+  }
+  const trimmed = value.trim();
+  if (!schemaNameRe.test(trimmed)) {
+    throw new ConfigError(
+      `"${trimmed}" is not a usable schema name. Use lowercase letters, digits and underscores, starting with a letter or underscore \u2014 for example ${DEFAULT_DATABASE_SCHEMA}.`
+    );
+  }
+  return trimmed;
+}
+function parseEnabledVendors(value) {
+  if (value === void 0 || value === null) return [...SUPPORTED_VENDORS];
+  if (!Array.isArray(value)) {
+    throw new ConfigError("Enabled vendors must be a list.");
+  }
+  const unknown2 = value.filter(
+    (entry) => !SUPPORTED_VENDORS.includes(entry)
+  );
+  if (unknown2.length > 0) {
+    throw new ConfigError(
+      `No parser ships for ${unknown2.join(", ")}. Supported vendors are ${SUPPORTED_VENDORS.join(", ")}.`
+    );
+  }
+  return value;
+}
+function parseSettings(config2) {
+  const databaseUrlRef = config2[CONFIG_KEYS.databaseUrl];
+  if (!isSecretRefBinding(databaseUrlRef)) {
+    throw new ConfigError(
+      `This plugin has no database connection configured. Save a PostgreSQL connection string as a Paperclip secret and pick it in ${SETTINGS_PATH}.`
+    );
+  }
+  return {
+    databaseUrlRef,
+    databaseSchema: parseDatabaseSchema(config2[CONFIG_KEYS.databaseSchema]),
+    enabledVendors: parseEnabledVendors(config2[CONFIG_KEYS.enabledVendors])
+  };
+}
+async function resolveConnection(ctx, companyId) {
+  const settings = parseSettings(await ctx.config.get(companyId));
+  const connectionString = await ctx.secrets.resolve(settings.databaseUrlRef, {
+    companyId,
+    configPath: CONFIG_KEYS.databaseUrl
+  });
+  if (!connectionString) {
+    throw new ConfigError(
+      "The configured database connection secret resolved to an empty value."
+    );
+  }
+  return { connectionString, settings };
+}
+var ConfigError, schemaNameRe;
+var init_config = __esm({
+  "src/config.ts"() {
+    "use strict";
+    init_constants();
+    init_errors();
+    ConfigError = class extends OperatorFacingError {
+    };
+    schemaNameRe = new RegExp(SCHEMA_NAME_PATTERN);
+  }
+});
+
+// src/db.ts
+import { createHash } from "node:crypto";
+import { Pool } from "pg";
+function fingerprintOf(connectionString, schema) {
+  return createHash("sha256").update(`${schema}\0${connectionString}`).digest("hex");
+}
+function quoteIdentifier(name) {
+  if (!new RegExp(SCHEMA_NAME_PATTERN).test(name)) {
+    throw new Error(`Refusing to interpolate unsafe identifier: ${name}`);
+  }
+  return `"${name}"`;
+}
+function createHandle(connectionString, schema) {
+  const pool = new Pool({
+    connectionString,
+    // A plugin worker is shared by every company, so one company's inventory
+    // work must not be able to exhaust the database's connection slots.
+    max: 4,
+    idleTimeoutMillis: 3e4,
+    connectionTimeoutMillis: 1e4,
+    application_name: "paperclip-plugin-inventory"
+  });
+  pool.on("error", () => {
+  });
+  const setSearchPath = `SET LOCAL search_path TO ${quoteIdentifier(schema)}`;
+  return {
+    pool,
+    schema,
+    async transaction(fn) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(setSearchPath);
+        const result = await fn(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error62) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+        }
+        throw error62;
+      } finally {
+        client.release();
+      }
+    },
+    async query(sql, params2 = []) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN READ ONLY");
+        await client.query(setSearchPath);
+        const result = await client.query(sql, params2);
+        await client.query("COMMIT");
+        return result.rows;
+      } catch (error62) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+        }
+        throw error62;
+      } finally {
+        client.release();
+      }
+    }
+  };
+}
+async function getDatabase(companyId, connectionString, schema) {
+  const fingerprint = fingerprintOf(connectionString, schema);
+  const cached2 = pools.get(companyId);
+  if (cached2) {
+    if (cached2.fingerprint === fingerprint) return cached2.handle;
+    pools.delete(companyId);
+    await cached2.handle.pool.end().catch(() => {
+    });
+  }
+  const handle = createHandle(connectionString, schema);
+  pools.set(companyId, { handle, fingerprint });
+  return handle;
+}
+async function closeAllDatabases() {
+  const open2 = [...pools.values()];
+  pools.clear();
+  await Promise.all(open2.map((entry) => entry.handle.pool.end().catch(() => {
+  })));
+}
+var pools;
+var init_db = __esm({
+  "src/db.ts"() {
+    "use strict";
+    init_constants();
+    pools = /* @__PURE__ */ new Map();
+  }
+});
+
+// src/parts.ts
+function parsePartRef(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new InputError(
+      "A part is required: either a vendor-qualified reference such as vendor-a:part-001, or the part's internal id."
+    );
+  }
+  const trimmed = value.trim();
+  if (UUID.test(trimmed)) return { kind: "id", id: trimmed.toLowerCase() };
+  const separator = trimmed.indexOf(":");
+  if (separator < 0) {
+    throw new InputError(
+      `"${trimmed}" is not a part reference. Use vendor:part-number, for example vendor-a:part-001, or the part's internal id.`
+    );
+  }
+  const vendor = trimmed.slice(0, separator).trim().toLowerCase();
+  const vendorPartNumber = trimmed.slice(separator + 1).trim();
+  if (!VENDOR_KEY.test(vendor)) {
+    throw new InputError(
+      `"${vendor}" is not a usable vendor key. Use lowercase letters, digits, dots, dashes and underscores \u2014 for example mcmaster.`
+    );
+  }
+  if (vendorPartNumber === "") {
+    throw new InputError(`"${trimmed}" names a vendor but no part number.`);
+  }
+  if (vendorPartNumber.length > MAX_PART_NUMBER_LENGTH) {
+    throw new InputError(
+      `That part number is ${vendorPartNumber.length} characters long. A part number is at most ${MAX_PART_NUMBER_LENGTH}; this is probably a description.`
+    );
+  }
+  if (CONTROL_CHARACTERS.test(vendorPartNumber)) {
+    throw new InputError("That part number contains control characters.");
+  }
+  return {
+    kind: "vendor",
+    vendor,
+    vendorPartNumber,
+    // Normalised, so the value we echo back is the value that would match next
+    // time. Only the vendor half is lowercased: the part number keeps the
+    // vendor's own casing, and the database matches it case-insensitively.
+    ref: `${vendor}:${vendorPartNumber}`
+  };
+}
+function formatPartRef(vendor, vendorPartNumber) {
+  return `${vendor}:${vendorPartNumber}`;
+}
+var UUID, VENDOR_KEY, MAX_PART_NUMBER_LENGTH, CONTROL_CHARACTERS;
+var init_parts = __esm({
+  "src/parts.ts"() {
+    "use strict";
+    init_errors();
+    UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    VENDOR_KEY = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+    MAX_PART_NUMBER_LENGTH = 128;
+    CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+  }
+});
+
+// src/quantity.ts
+function parseQuantity(value, options) {
+  const { label: label2 } = options;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new InputError(`${label2} must be a number.`);
+  }
+  if (options.positive && value <= 0) {
+    throw new InputError(`${label2} must be greater than zero.`);
+  }
+  if ((options.nonZero || options.positive) && value === 0) {
+    throw new InputError(
+      `${label2} cannot be zero \u2014 a movement of nothing is not a movement.`
+    );
+  }
+  if (Math.abs(value) > MAX_MAGNITUDE) {
+    throw new InputError(`${label2} is larger than this inventory can store.`);
+  }
+  const scaled2 = value * SCALE_FACTOR;
+  if (Math.abs(scaled2 - Math.round(scaled2)) > 1e-6) {
+    throw new InputError(
+      `${label2} has more than ${QUANTITY_SCALE} decimal places. Stock is stored to ${QUANTITY_SCALE} decimals, and rounding it quietly is how a ledger stops being trustworthy.`
+    );
+  }
+  return Math.round(scaled2) / SCALE_FACTOR;
+}
+function toNumber(value) {
+  if (value === null || value === void 0) return 0;
+  if (typeof value === "number") return value;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Expected a numeric value from the database, got ${String(value)}`);
+  }
+  return Math.round(parsed * SCALE_FACTOR) / SCALE_FACTOR;
+}
+var QUANTITY_SCALE, MAX_MAGNITUDE, SCALE_FACTOR;
+var init_quantity = __esm({
+  "src/quantity.ts"() {
+    "use strict";
+    init_errors();
+    QUANTITY_SCALE = 4;
+    MAX_MAGNITUDE = 9999999999;
+    SCALE_FACTOR = 10 ** QUANTITY_SCALE;
+  }
+});
+
+// src/ledger.ts
+function idempotencyKey(...parts) {
+  return JSON.stringify(parts);
+}
+function toEntry(row) {
+  return {
+    id: String(row.id),
+    partId: row.part_id,
+    entryType: row.entry_type,
+    quantityDelta: toNumber(row.quantity_delta),
+    onHandDelta: toNumber(row.on_hand_delta),
+    onOrderDelta: toNumber(row.on_order_delta),
+    reference: row.reference,
+    idempotencyKey: row.idempotency_key,
+    note: row.note,
+    unitCost: row.unit_cost === null ? null : toNumber(row.unit_cost),
+    createdAt: row.created_at,
+    createdBy: row.created_by
+  };
+}
+function toStock(row) {
+  const vendor = row.vendor;
+  const vendorPartNumber = row.vendor_part_number;
+  return {
+    partId: row.part_id,
+    ref: formatPartRef(vendor, vendorPartNumber),
+    vendor,
+    vendorPartNumber,
+    description: row.description ?? null,
+    unitOfMeasure: row.unit_of_measure,
+    onHand: toNumber(row.on_hand),
+    onOrder: toNumber(row.on_order),
+    committed: toNumber(row.committed),
+    available: toNumber(row.available),
+    lastEntryAt: row.last_entry_at ?? null
+  };
+}
+async function resolvePart(client, part, options) {
+  if (part.kind === "id") {
+    const { rows } = await client.query(
+      "SELECT id, vendor, vendor_part_number FROM parts WHERE id = $1",
+      [part.id]
+    );
+    const row2 = rows[0];
+    if (!row2) {
+      throw new InputError(
+        `No part has the id ${part.id}. Use a vendor-qualified reference such as vendor-a:part-001 if this part is new.`
+      );
+    }
+    return {
+      partId: row2.id,
+      vendor: row2.vendor,
+      vendorPartNumber: row2.vendor_part_number,
+      ref: formatPartRef(row2.vendor, row2.vendor_part_number)
+    };
+  }
+  const lookup = `SELECT id, vendor, vendor_part_number FROM parts
+      WHERE vendor = $1 AND lower(vendor_part_number) = lower($2)`;
+  const existing = await client.query(lookup, [part.vendor, part.vendorPartNumber]);
+  if (existing.rows[0]) {
+    const row2 = existing.rows[0];
+    return {
+      partId: row2.id,
+      vendor: row2.vendor,
+      vendorPartNumber: row2.vendor_part_number,
+      ref: formatPartRef(row2.vendor, row2.vendor_part_number)
+    };
+  }
+  if (!options.create) {
+    throw new InputError(
+      `This inventory has no part ${part.ref}. Record a receipt or an adjustment for it first, or check the part number.`
+    );
+  }
+  await client.query(
+    `INSERT INTO parts (vendor, vendor_part_number, description, unit_of_measure)
+     VALUES ($1, $2, $3, COALESCE($4, 'each'))
+     ON CONFLICT DO NOTHING`,
+    [part.vendor, part.vendorPartNumber, options.description ?? null, options.unitOfMeasure ?? null]
+  );
+  const created = await client.query(lookup, [part.vendor, part.vendorPartNumber]);
+  const row = created.rows[0];
+  if (!row) {
+    throw new LedgerError(`The part ${part.ref} could not be created.`);
+  }
+  return {
+    partId: row.id,
+    vendor: row.vendor,
+    vendorPartNumber: row.vendor_part_number,
+    ref: formatPartRef(row.vendor, row.vendor_part_number)
+  };
+}
+async function outstandingOnOrder(client, partId, reference) {
+  const { rows } = await client.query(
+    `SELECT COALESCE(SUM(on_order_delta), 0) AS outstanding
+       FROM ledger_entries WHERE part_id = $1 AND reference = $2`,
+    [partId, reference]
+  );
+  return Math.max(toNumber(rows[0]?.outstanding), 0);
+}
+async function currentOnHand(client, partId) {
+  const { rows } = await client.query(
+    "SELECT COALESCE(SUM(on_hand_delta), 0) AS on_hand FROM ledger_entries WHERE part_id = $1",
+    [partId]
+  );
+  return toNumber(rows[0]?.on_hand);
+}
+async function readStockFor(client, partId) {
+  const { rows } = await client.query("SELECT * FROM part_stock WHERE part_id = $1", [partId]);
+  if (!rows[0]) throw new LedgerError("The part disappeared while it was being written.");
+  return toStock(rows[0]);
+}
+async function findByIdempotencyKey(client, key) {
+  const { rows } = await client.query(
+    `SELECT ${ENTRY_COLUMNS} FROM ledger_entries WHERE idempotency_key = $1`,
+    [key]
+  );
+  return rows[0] ? toEntry(rows[0]) : void 0;
+}
+function bucketsFor(entryType, quantity2, outstanding) {
+  switch (entryType) {
+    case "purchase":
+      return { quantityDelta: quantity2, onHandDelta: 0, onOrderDelta: quantity2 };
+    case "receipt":
+      return {
+        quantityDelta: quantity2,
+        onHandDelta: quantity2,
+        onOrderDelta: -Math.min(quantity2, outstanding)
+      };
+    case "sale":
+      return { quantityDelta: -quantity2, onHandDelta: -quantity2, onOrderDelta: 0 };
+    case "adjustment":
+      return { quantityDelta: quantity2, onHandDelta: quantity2, onOrderDelta: 0 };
+  }
+}
+async function appendEntry(db, input2, transactionClient) {
+  if (input2.entryType !== "adjustment" && input2.quantity <= 0) {
+    throw new InputError(`A ${input2.entryType} quantity must be greater than zero.`);
+  }
+  if (input2.entryType === "adjustment" && input2.quantity === 0) {
+    throw new InputError("An adjustment of zero changes nothing.");
+  }
+  const reference = input2.reference.trim();
+  if (reference === "") {
+    throw new InputError("A reference is required: it is what makes this entry traceable.");
+  }
+  let attemptedKey;
+  const transact = transactionClient ? async (fn) => fn(transactionClient) : db.transaction.bind(db);
+  const write2 = async () => transact(async (client) => {
+    const part = await resolvePart(client, input2.part, {
+      create: input2.createMissingPart === true,
+      description: input2.description,
+      unitOfMeasure: input2.unitOfMeasure
+    });
+    const key = input2.idempotencyScope ? idempotencyKey(...input2.idempotencyScope, part.partId, reference) : void 0;
+    attemptedKey = key;
+    await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [part.partId]);
+    if (key) {
+      const existing = await findByIdempotencyKey(client, key);
+      if (existing) {
+        return {
+          entry: existing,
+          part,
+          duplicate: true,
+          stock: await readStockFor(client, part.partId)
+        };
+      }
+    }
+    const outstanding = input2.entryType === "receipt" ? await outstandingOnOrder(client, part.partId, reference) : 0;
+    const deltas = bucketsFor(input2.entryType, input2.quantity, outstanding);
+    if (deltas.onHandDelta < 0 && input2.entryType !== "adjustment") {
+      const onHand = await currentOnHand(client, part.partId);
+      if (onHand + deltas.onHandDelta < 0) {
+        throw new LedgerError(
+          `That ${input2.entryType} would leave ${part.ref} at ${onHand + deltas.onHandDelta}, and on-hand cannot go negative. On hand is ${onHand}. Record an adjustment if the count really is wrong.`
+        );
+      }
+    }
+    const { rows } = await client.query(
+      `INSERT INTO ledger_entries
+           (part_id, entry_type, quantity_delta, on_hand_delta, on_order_delta,
+            unit_cost, reference, idempotency_key, note, provenance, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+         RETURNING ${ENTRY_COLUMNS}`,
+      [
+        part.partId,
+        input2.entryType,
+        deltas.quantityDelta,
+        deltas.onHandDelta,
+        deltas.onOrderDelta,
+        input2.unitCost ?? null,
+        reference,
+        key ?? null,
+        input2.note ?? null,
+        JSON.stringify(input2.provenance),
+        input2.createdBy
+      ]
+    );
+    return {
+      entry: toEntry(rows[0]),
+      part,
+      duplicate: false,
+      stock: await readStockFor(client, part.partId)
+    };
+  });
+  try {
+    return await write2();
+  } catch (error62) {
+    if (!transactionClient && attemptedKey && error62?.code === UNIQUE_VIOLATION) {
+      const key = attemptedKey;
+      const existing = await db.transaction(async (client) => {
+        const entry = await findByIdempotencyKey(client, key);
+        if (!entry) return void 0;
+        return {
+          entry,
+          part: await partOf(client, entry.partId),
+          duplicate: true,
+          stock: await readStockFor(client, entry.partId)
+        };
+      });
+      if (existing) return existing;
+    }
+    throw error62;
+  }
+}
+async function partOf(client, partId) {
+  const { rows } = await client.query(
+    "SELECT id, vendor, vendor_part_number FROM parts WHERE id = $1",
+    [partId]
+  );
+  const row = rows[0];
+  if (!row) throw new LedgerError(`Part ${partId} is referenced by a ledger entry but missing.`);
+  return {
+    partId: row.id,
+    vendor: row.vendor,
+    vendorPartNumber: row.vendor_part_number,
+    ref: formatPartRef(row.vendor, row.vendor_part_number)
+  };
+}
+async function readStock(db, part) {
+  if (!part) {
+    const rows2 = await db.query("SELECT * FROM part_stock ORDER BY vendor, vendor_part_number");
+    return rows2.map(toStock);
+  }
+  const rows = part.kind === "id" ? await db.query("SELECT * FROM part_stock WHERE part_id = $1", [part.id]) : await db.query(
+    `SELECT * FROM part_stock
+             WHERE vendor = $1 AND lower(vendor_part_number) = lower($2)`,
+    [part.vendor, part.vendorPartNumber]
+  );
+  return rows.map(toStock);
+}
+var UNIQUE_VIOLATION, ENTRY_COLUMNS;
+var init_ledger = __esm({
+  "src/ledger.ts"() {
+    "use strict";
+    init_errors();
+    init_parts();
+    init_quantity();
+    UNIQUE_VIOLATION = "23505";
+    ENTRY_COLUMNS = `id, part_id, entry_type, quantity_delta, on_hand_delta,
+  on_order_delta, reference, idempotency_key, note, unit_cost, created_at, created_by`;
+  }
+});
+
+// src/migrate.ts
+import { createHash as createHash2 } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import path2 from "node:path";
+function checksumOf(sql) {
+  return createHash2("sha256").update(sql).digest("hex");
+}
+async function loadMigrations(dir) {
+  const entries2 = await readdir(dir, { withFileTypes: true });
+  const files = entries2.filter((entry) => entry.isFile() && entry.name.endsWith(".sql")).map((entry) => entry.name).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const prefixes = /* @__PURE__ */ new Set();
+  const migrations = [];
+  for (const file3 of files) {
+    const key = file3.slice(0, -4);
+    const prefix = key.split("_")[0] ?? key;
+    if (prefixes.has(prefix)) {
+      throw new Error(
+        `Two migrations share the prefix "${prefix}". Renumber one of them; the prefix is what fixes the order.`
+      );
+    }
+    prefixes.add(prefix);
+    const sql = await readFile(path2.join(dir, file3), "utf8");
+    migrations.push({ key, sql, checksum: checksumOf(sql) });
+  }
+  return migrations;
+}
+async function migrate(db, migrationsDir) {
+  const migrations = await loadMigrations(migrationsDir);
+  const schema = quoteIdentifier(db.schema);
+  const client = await db.pool.connect();
+  const applied = [];
+  try {
+    await client.query("SELECT pg_advisory_lock($1::bigint)", [ADVISORY_LOCK_KEY]);
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ${schema}.schema_migrations (
+        key text PRIMARY KEY,
+        checksum text NOT NULL,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    const { rows } = await client.query(
+      `SELECT key, checksum FROM ${schema}.schema_migrations`
+    );
+    const seen = new Map(rows.map((row) => [row.key, row.checksum]));
+    for (const migration of migrations) {
+      const previous = seen.get(migration.key);
+      if (previous !== void 0) {
+        if (previous !== migration.checksum) {
+          throw new Error(
+            `Migration ${migration.key} has already been applied but its contents have changed. Applied migrations are history: add a new migration instead of editing this one.`
+          );
+        }
+        continue;
+      }
+      await client.query("BEGIN");
+      try {
+        await client.query(`SET LOCAL search_path TO ${schema}`);
+        await client.query(migration.sql);
+        await client.query(
+          `INSERT INTO ${schema}.schema_migrations (key, checksum) VALUES ($1, $2)`,
+          [migration.key, migration.checksum]
+        );
+        await client.query("COMMIT");
+      } catch (error62) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+        }
+        throw new Error(
+          `Migration ${migration.key} failed: ${error62 instanceof Error ? error62.message : String(error62)}`
+        );
+      }
+      applied.push(migration.key);
+    }
+  } finally {
+    try {
+      await client.query("SELECT pg_advisory_unlock($1::bigint)", [ADVISORY_LOCK_KEY]);
+    } catch {
+    }
+    client.release();
+  }
+  return applied;
+}
+var ADVISORY_LOCK_KEY;
+var init_migrate = __esm({
+  "src/migrate.ts"() {
+    "use strict";
+    init_db();
+    ADVISORY_LOCK_KEY = BigInt(
+      `0x${createHash2("sha256").update("paperclip-plugin-inventory").digest("hex").slice(0, 8)}`
+    ).toString();
+  }
+});
+
+// src/storage.ts
+import { readdir as readdir2 } from "node:fs/promises";
+import path3 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function migrationsDirectory() {
+  return path3.resolve(path3.dirname(fileURLToPath2(import.meta.url)), "..", "migrations");
+}
+async function loadMigrationFiles(dir) {
+  try {
+    const files = await readdir2(dir);
+    if (!files.some((name) => name.endsWith(".sql"))) {
+      throw new Error("no .sql files");
+    }
+  } catch {
+    throw new StorageError(
+      `This installation of the inventory plugin is missing its migrations directory (expected at ${dir}). Reinstall the plugin.`
+    );
+  }
+}
+async function ensureMigrated(db) {
+  const inFlight = migrated.get(db);
+  if (inFlight) return inFlight;
+  const run = migrate(db, migrationsDirectory()).then(() => void 0);
+  migrated.set(db, run);
+  try {
+    await run;
+  } catch (error62) {
+    migrated.delete(db);
+    throw error62;
+  }
+}
+async function openStore(ctx, companyId) {
+  const { connectionString, settings } = await resolveConnection(ctx, companyId);
+  let db;
+  try {
+    db = await getDatabase(companyId, connectionString, settings.databaseSchema);
+  } catch (error62) {
+    ctx.logger.error("Could not open the inventory database", {
+      companyId,
+      reason: error62?.message
+    });
+    throw new StorageError(
+      `The inventory database could not be opened. Check the connection secret in ${SETTINGS_PATH}.`
+    );
+  }
+  await loadMigrationFiles(migrationsDirectory());
+  try {
+    await ensureMigrated(db);
+  } catch (error62) {
+    ctx.logger.error("Inventory migrations failed", {
+      companyId,
+      schema: settings.databaseSchema,
+      reason: error62?.message
+    });
+    throw new StorageError(
+      `The inventory database could not be brought up to date. The plugin log has the failing migration; check that the connection in ${SETTINGS_PATH} can create tables in the "${settings.databaseSchema}" schema.`
+    );
+  }
+  return db;
+}
+var migrated;
+var init_storage = __esm({
+  "src/storage.ts"() {
+    "use strict";
+    init_config();
+    init_constants();
+    init_db();
+    init_errors();
+    init_migrate();
+    migrated = /* @__PURE__ */ new WeakMap();
+  }
+});
+
+// src/bom.ts
+import { createHash as createHash3 } from "node:crypto";
+import { parse as parseYaml } from "yaml";
+function text3(value, label2, problems, max = MAX_TEXT2) {
+  if (typeof value !== "string" || value.trim() === "") {
+    problems.push(`${label2} is required`);
+    return void 0;
+  }
+  if (value.length > max) {
+    problems.push(`${label2} is longer than ${max} characters`);
+    return void 0;
+  }
+  if (CONTROL_CHARACTERS3.test(value)) {
+    problems.push(`${label2} contains control characters`);
+    return void 0;
+  }
+  return value.trim();
+}
+function quantity(value, label2, problems) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    problems.push(`${label2} must be a positive number, found ${JSON.stringify(value)}`);
+    return void 0;
+  }
+  if (value > MAX_QUANTITY) {
+    problems.push(`${label2} is ${value}; a per-unit quantity that large is a typo`);
+    return void 0;
+  }
+  if (Number(value.toFixed(QUANTITY_SCALE2)) !== value) {
+    problems.push(`${label2} has more than ${QUANTITY_SCALE2} decimal places`);
+    return void 0;
+  }
+  return value;
+}
+function pendingOf(value, label2, problems) {
+  if (value === void 0 || value === null) return [];
+  const entries2 = Array.isArray(value) ? value : [value];
+  const reasons = [];
+  for (const [index, entry] of entries2.entries()) {
+    const reason = text3(entry, `${label2}[${index}]`, problems, 1e3);
+    if (reason) reasons.push(reason);
+  }
+  if (reasons.length === 0) problems.push(`${label2} must say what is unresolved`);
+  return reasons;
+}
+function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = {}) {
+  if (allowEmpty && Array.isArray(raw) && raw.length === 0) return [];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    problems.push(`${where} must list at least one line`);
+    return [];
+  }
+  const lines = [];
+  for (const [index, entry] of raw.entries()) {
+    const at = `${where}[${index}]`;
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      problems.push(`${at} is not a mapping`);
+      continue;
+    }
+    const line = entry;
+    const pending = pendingOf(line.pending, `${at} pending`, problems);
+    const description = text3(line.customer_description, `${at} customer_description`, problems);
+    let qty;
+    if (line.qty === void 0 || line.qty === null) {
+      if (pending.length === 0) {
+        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
+      }
+    } else {
+      qty = quantity(line.qty, `${at} qty`, problems);
+      if (qty === void 0) continue;
+    }
+    let part;
+    if (line.part === void 0 || line.part === null) {
+      if (pending.length === 0) {
+        problems.push(`${at} needs a part, or a pending reason saying why it has none yet`);
+      }
+    } else if (typeof line.part !== "string" || !PART_REF.test(line.part)) {
+      problems.push(`${at} part must look like vendor:part-number, found ${JSON.stringify(line.part)}`);
+    } else {
+      part = line.part.trim();
+      const key = `${scope.optionName ?? ""}\0${scope.optionValue ?? ""}\0${part.toLowerCase()}`;
+      if (seen.has(key)) problems.push(`${at} lists ${part} twice in the same option scope`);
+      seen.add(key);
+    }
+    const sourceLineId = line.source_line_id === void 0 ? void 0 : text3(line.source_line_id, `${at} source_line_id`, problems, 120);
+    if (description === void 0) continue;
+    lines.push({
+      ...part ? { part } : {},
+      ...qty === void 0 ? {} : { qty },
+      customerDescription: description,
+      ...scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {},
+      ...sourceLineId ? { sourceLineId } : {},
+      pending
+    });
+  }
+  return lines;
+}
+function validateBom(fileName, document2) {
+  const problems = [];
+  if (document2 === null || typeof document2 !== "object" || Array.isArray(document2)) {
+    return { problems: ["is empty or is not a mapping"] };
+  }
+  const raw = document2;
+  const expectedKey = fileName.replace(/\.ya?ml$/, "");
+  const catalogKey = text3(raw.catalog_key, "catalog_key", problems, 64);
+  if (catalogKey !== void 0 && catalogKey !== expectedKey) {
+    problems.push(`catalog_key "${catalogKey}" does not match the file name "${expectedKey}"`);
+  }
+  let catalogKeyKind;
+  if (catalogKey !== void 0) {
+    const inferred = PRODUCT_KEY.test(catalogKey) ? "product_id" : VARIANT_SKU.test(catalogKey) ? "variant_sku" : void 0;
+    if (!inferred) {
+      problems.push(
+        `catalog_key "${catalogKey}" is neither a variant SKU nor product-<id>. Use the variant SKU when the product has one; otherwise product-<BigCommerce product id>.`
+      );
+    } else if (raw.catalog_key_kind !== void 0 && raw.catalog_key_kind !== inferred) {
+      problems.push(
+        `catalog_key_kind says ${JSON.stringify(raw.catalog_key_kind)} but "${catalogKey}" is a ${inferred}`
+      );
+    } else {
+      catalogKeyKind = inferred;
+    }
+  }
+  const status = raw.status === void 0 ? "active" : raw.status;
+  if (status !== "active" && status !== "draft") {
+    problems.push(`status must be "active" or "draft", found ${JSON.stringify(raw.status)}`);
+  }
+  const installDocument = raw.install_document === void 0 ? void 0 : text3(raw.install_document, "install_document", problems, 300);
+  if (installDocument !== void 0 && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
+    problems.push(
+      `install_document "${installDocument}" is not an install-instructions/<name>.MD path in the documentation repository`
+    );
+  }
+  const sourceRevision = raw.source_revision === void 0 ? void 0 : text3(raw.source_revision, "source_revision", problems, 64);
+  const seen = /* @__PURE__ */ new Set();
+  const lines = parseLines(raw.lines, "lines", {}, problems, seen);
+  if (raw.unresolved_lines !== void 0) {
+    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, /* @__PURE__ */ new Set(), { allowEmpty: true });
+    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
+    if (status !== "draft" && unresolvedLines.length > 0) {
+      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
+    }
+  }
+  const optionScopes = [];
+  if (raw.options !== void 0) {
+    if (!Array.isArray(raw.options)) {
+      problems.push("options must be a list");
+    } else {
+      const scopes = /* @__PURE__ */ new Set();
+      for (const [index, entry] of raw.options.entries()) {
+        const at = `options[${index}]`;
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+          problems.push(`${at} is not a mapping`);
+          continue;
+        }
+        const option = entry;
+        const optionName = text3(option.bigcommerce_option, `${at} bigcommerce_option`, problems, 250);
+        const optionValue = text3(option.option_value, `${at} option_value`, problems, 250);
+        if (optionName === void 0 || optionValue === void 0) continue;
+        const scope = `${optionName}\0${optionValue}`;
+        if (scopes.has(scope)) {
+          problems.push(`${at} repeats the option value "${optionName}: ${optionValue}"`);
+        }
+        scopes.add(scope);
+        optionScopes.push({ optionName, optionValue });
+        lines.push(
+          ...parseLines(option.lines, `${at} lines`, { optionName, optionValue }, problems, seen, {
+            allowEmpty: true
+          })
+        );
+      }
+    }
+  }
+  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
+  if (status === "active" && unresolved.length > 0) {
+    problems.push(
+      `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`
+    );
+  }
+  if (status === "draft" && unresolved.length === 0) {
+    problems.push("status: draft with nothing pending. Set status: active to put this BOM into use.");
+  }
+  if (problems.length > 0 || catalogKey === void 0 || catalogKeyKind === void 0) {
+    return { problems };
+  }
+  return {
+    bom: {
+      fileName,
+      catalogKey,
+      catalogKeyKind,
+      status,
+      ...installDocument ? { installDocument } : {},
+      ...sourceRevision ? { sourceRevision } : {},
+      lines,
+      optionScopes
+    },
+    problems
+  };
+}
+function parseBom(fileName, yamlText) {
+  let document2;
+  try {
+    document2 = parseYaml(yamlText);
+  } catch (error62) {
+    return { problems: [`is not valid YAML: ${error62.message}`] };
+  }
+  return validateBom(fileName, document2);
+}
+function contentHash(bom) {
+  const canonical = (rows) => [...rows].sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1);
+  const lines = canonical(
+    bom.lines.map((line) => [
+      line.optionName ?? "",
+      line.optionValue ?? "",
+      line.part ?? "",
+      line.qty,
+      line.customerDescription
+    ])
+  );
+  const scopes = canonical(bom.optionScopes.map((s) => [s.optionName, s.optionValue]));
+  return createHash3("sha256").update(JSON.stringify([bom.catalogKey, bom.catalogKeyKind, lines, scopes])).digest("hex");
+}
+function selectLines(bom, selections) {
+  const chosen = new Set(selections.map((s) => `${s.option}\0${s.value}`));
+  const declared = new Set(bom.optionScopes.map((s) => `${s.optionName}\0${s.optionValue}`));
+  const names = new Set(bom.optionScopes.map((s) => s.optionName));
+  return {
+    lines: bom.lines.filter(
+      (line) => !line.inclusionPending && (line.optionName === void 0 || chosen.has(`${line.optionName}\0${line.optionValue}`))
+    ),
+    missing: [...names].filter((name) => !selections.some((s) => s.option === name)),
+    conflicting: [...names].filter((name) => new Set(selections.filter((s) => s.option === name).map((s) => s.value)).size > 1),
+    unmatched: selections.filter(
+      (s) => names.has(s.option) && !declared.has(`${s.option}\0${s.value}`)
+    ),
+    ignored: selections.filter((s) => !names.has(s.option))
+  };
+}
+var PRODUCT_KEY, VARIANT_SKU, PART_REF, QUANTITY_SCALE2, MAX_QUANTITY, MAX_TEXT2, CONTROL_CHARACTERS3;
+var init_bom = __esm({
+  "src/bom.ts"() {
+    "use strict";
+    PRODUCT_KEY = /^product-[0-9]+$/;
+    VARIANT_SKU = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    PART_REF = /^[a-z0-9][a-z0-9._-]*:[^\s][^\u0000-\u001f]{0,127}$/;
+    QUANTITY_SCALE2 = 4;
+    MAX_QUANTITY = 1e6;
+    MAX_TEXT2 = 500;
+    CONTROL_CHARACTERS3 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+  }
+});
+
+// src/sales.ts
+var sales_exports = {};
+__export(sales_exports, {
+  expandSale: () => expandSale,
+  parseSelections: () => parseSelections,
+  readActiveBom: () => readActiveBom,
+  recordSale: () => recordSale
+});
+async function readActiveBom(client, catalogKey) {
+  const { rows } = await client.query(
+    `SELECT id, version, catalog_key, catalog_key_kind, content_hash, source_commit, option_scopes
+       FROM boms WHERE catalog_key = $1 ORDER BY version DESC LIMIT 1`,
+    [catalogKey]
+  );
+  const head = rows[0];
+  if (!head) return void 0;
+  const lines = await client.query(
+    `SELECT l.option_name, l.option_value, l.quantity_per_unit, l.customer_description,
+            l.source_line_id, p.vendor, p.vendor_part_number, l.part_id
+       FROM bom_lines l JOIN parts p ON p.id = l.part_id
+      WHERE l.bom_id = $1
+      ORDER BY l.option_name NULLS FIRST, l.option_value NULLS FIRST, p.vendor, p.vendor_part_number`,
+    [head.id]
+  );
+  return {
+    bomId: head.id,
+    version: Number(head.version),
+    catalogKey: head.catalog_key,
+    sourceCommit: head.source_commit ?? null,
+    bom: {
+      fileName: `${head.catalog_key}.yaml`,
+      catalogKey: head.catalog_key,
+      catalogKeyKind: head.catalog_key_kind,
+      status: "active",
+      lines: lines.rows.map((row) => ({
+        part: formatPartRef(row.vendor, row.vendor_part_number),
+        qty: Number(row.quantity_per_unit),
+        customerDescription: row.customer_description,
+        ...row.option_name ? { optionName: row.option_name } : {},
+        ...row.option_value ? { optionValue: row.option_value } : {},
+        ...row.source_line_id ? { sourceLineId: row.source_line_id } : {},
+        pending: []
+      })),
+      optionScopes: (head.option_scopes ?? []).filter((scope) => typeof scope.option === "string" && typeof scope.value === "string").map((scope) => ({ optionName: scope.option, optionValue: scope.value }))
+    }
+  };
+}
+function parseSelections(raw) {
+  if (raw === void 0 || raw === null) return [];
+  if (!Array.isArray(raw)) throw new InputError("options must be a list.");
+  if (raw.length > MAX_OPTIONS) throw new InputError(`An order with more than ${MAX_OPTIONS} options is not a real order.`);
+  return raw.map((entry, index) => {
+    const at = `options[${index}]`;
+    if (typeof entry === "string") {
+      const separator = entry.indexOf(":");
+      if (separator <= 0 || entry.slice(separator + 1).trim() === "") {
+        throw new InputError(
+          `${at} is "${entry}", which names an option but not the value the customer chose. Pass "option name: value", or { option, value }.`
+        );
+      }
+      return { option: entry.slice(0, separator).trim(), value: entry.slice(separator + 1).trim() };
+    }
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new InputError(`${at} must be "option name: value" or an object with option and value.`);
+    }
+    const { option, value } = entry;
+    if (typeof option !== "string" || option.trim() === "" || typeof value !== "string" || value.trim() === "") {
+      throw new InputError(`${at} must carry both an option name and the chosen value.`);
+    }
+    return { option: option.trim(), value: value.trim() };
+  });
+}
+async function expandSale(db, input2) {
+  return db.transaction(async (client) => {
+    const active = await readActiveBom(client, input2.catalogKey);
+    if (!active) {
+      throw new InputError(
+        `No BOM is active for ${input2.catalogKey}. Add the BOM file to the config repository and run sync_boms; until then a sale of this product has nothing to consume, and recording it would understate what was used.`
+      );
+    }
+    const { lines, unmatched, ignored, missing, conflicting } = selectLines(active.bom, input2.selections);
+    if (missing.length > 0 || conflicting.length > 0) {
+      throw new InputError(
+        `BOM version ${active.version} of ${active.catalogKey} requires exactly one selection for each declared option. Missing: ${missing.join(", ") || "none"}; conflicting: ${conflicting.join(", ") || "none"}. Nothing was consumed.`
+      );
+    }
+    if (unmatched.length > 0) {
+      throw new InputError(
+        `BOM version ${active.version} of ${active.catalogKey} has no answer for ${unmatched.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}. The storefront offers a value this BOM does not, which is an option renamed or added without updating the BOM. Nothing was consumed.`
+      );
+    }
+    if (lines.length === 0) {
+      throw new LedgerError(
+        `BOM version ${active.version} of ${active.catalogKey} expands to no lines for these options, so this sale would consume nothing.`
+      );
+    }
+    const consumed = [];
+    let duplicates = 0;
+    for (const line of lines) {
+      const perUnit = line.qty;
+      const quantity2 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
+        label: `Consumption of ${line.part}`,
+        positive: true
+      });
+      const result = await appendEntry(
+        db,
+        {
+          part: parsePartRef(line.part),
+          entryType: "sale",
+          quantity: quantity2,
+          reference: input2.reference,
+          // The reference is the BigCommerce order id and line, so repeating it
+          // is the same sale. The part is added by `appendEntry` from the
+          // resolved row, which is what makes a retry recognisable.
+          idempotencyScope: ["sale"],
+          note: line.customerDescription,
+          provenance: {
+            source: "record_sale",
+            agentId: input2.run.agentId,
+            runId: input2.run.runId,
+            companyId: input2.run.companyId,
+            projectId: input2.run.projectId,
+            catalogKey: active.catalogKey,
+            bomId: active.bomId,
+            bomVersion: active.version,
+            bomSourceCommit: active.sourceCommit,
+            quantityPerUnit: perUnit,
+            unitsSold: input2.qty,
+            reference: input2.reference,
+            ...line.optionName ? { option: line.optionName, optionValue: line.optionValue } : {},
+            ...line.sourceLineId ? { sourceLineId: line.sourceLineId } : {}
+          },
+          createdBy: input2.run.agentId
+        },
+        client
+      );
+      if (result.duplicate) {
+        duplicates += 1;
+        if (result.entry.quantityDelta !== -quantity2) {
+          throw new InputError(
+            `Reference "${input2.reference}" already consumed ${-result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. A sale that really did change quantity needs a new reference; a BOM that changed needs an adjustment.`
+          );
+        }
+      }
+      consumed.push({
+        partId: result.part.partId,
+        partRef: result.part.ref,
+        quantityPerUnit: perUnit,
+        quantityConsumed: quantity2,
+        ...line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {},
+        duplicate: result.duplicate,
+        onHand: result.stock.onHand
+      });
+    }
+    if (duplicates > 0 && duplicates < consumed.length) {
+      throw new InputError(
+        `Reference "${input2.reference}" was already recorded against a different set of parts than BOM version ${active.version} expands to (${duplicates} of ${consumed.length} lines matched). Nothing was changed. Record an adjustment for the difference rather than re-recording the sale.`
+      );
+    }
+    return {
+      catalogKey: active.catalogKey,
+      bomVersion: active.version,
+      bomId: active.bomId,
+      qty: input2.qty,
+      reference: input2.reference,
+      lines: consumed,
+      ignoredOptions: [...ignored],
+      duplicate: duplicates > 0
+    };
+  });
+}
+async function recordSale(ctx, rawParams, run) {
+  if (rawParams === null || typeof rawParams !== "object" || Array.isArray(rawParams)) {
+    throw new InputError("record_sale parameters must be an object.");
+  }
+  const params2 = rawParams;
+  const catalogKey = typeof params2.productSku === "string" ? params2.productSku.trim() : "";
+  if (catalogKey === "" || catalogKey.length > 64) {
+    throw new InputError(
+      "A product is required: its BigCommerce variant SKU, or product-<id> for a product whose variants have no SKU."
+    );
+  }
+  const qty = parseQuantity(params2.qty, { label: "The sold quantity", positive: true });
+  const reference = typeof params2.reference === "string" ? params2.reference.trim() : "";
+  if (reference === "") {
+    throw new InputError(
+      "A reference is required \u2014 the BigCommerce order id and line. It is what makes recording the same sale twice harmless."
+    );
+  }
+  const selections = parseSelections(params2.options);
+  const db = await openStore(ctx, run.companyId);
+  const data = await expandSale(db, { catalogKey, qty, reference, selections, run });
+  const summary = data.lines.map((line) => `${line.partRef}: ${line.quantityConsumed} consumed, ${line.onHand} on hand`).join("\n");
+  const ignored = data.ignoredOptions.length ? `
+Options with no BOM lines behind them, so nothing was consumed for them: ${data.ignoredOptions.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}.` : "";
+  return {
+    content: data.duplicate ? `Already recorded \u2014 reference "${data.reference}" consumed these parts before, so nothing changed.
+${summary}` : `Sale of ${data.qty} \xD7 ${data.catalogKey} consumed ${data.lines.length} part${data.lines.length === 1 ? "" : "s"} through BOM version ${data.bomVersion}.
+${summary}${ignored}`,
+    data
+  };
+}
+var MAX_OPTIONS;
+var init_sales = __esm({
+  "src/sales.ts"() {
+    "use strict";
+    init_bom();
+    init_errors();
+    init_ledger();
+    init_parts();
+    init_quantity();
+    init_storage();
+    MAX_OPTIONS = 50;
+  }
+});
 
 // node_modules/@paperclipai/plugin-sdk/dist/define-plugin.js
 function definePlugin(definition) {
@@ -42039,725 +43298,18 @@ function startWorkerRpcHost(options) {
   };
 }
 
-// src/constants.ts
-var CONFIG_KEYS = {
-  /**
-   * Secret ref holding the PostgreSQL connection string.
-   *
-   * A ref rather than a string: the value carries a password, and a password
-   * in plugin config is a password in a database row and in every settings
-   * API response.
-   */
-  databaseUrl: "databaseUrl",
-  /**
-   * Schema the plugin owns inside that database.
-   *
-   * Configurable because this plugin is meant to be reusable: another
-   * deployment may already have an `inventory` schema, or may want the tables
-   * somewhere else entirely.
-   */
-  databaseSchema: "databaseSchema",
-  /**
-   * Vendors whose parsers are enabled for this company.
-   *
-   * Which vendors a business buys from is a deployment setting, so it comes
-   * from config. The parser modules themselves ship with the plugin.
-   */
-  enabledVendors: "enabledVendors",
-  /**
-   * The private config repository holding `bom/`, as `owner/name`.
-   *
-   * Which repository is a deployment setting, so it comes from config rather
-   * than from this code: the plugin is reusable and another business's BOMs
-   * live somewhere else entirely.
-   */
-  configRepo: "configRepo",
-  /** Branch to read BOMs from. Blank means the repository's default branch. */
-  configRepoBranch: "configRepoBranch",
-  /**
-   * Secret ref holding a GitHub token with read access to that repository.
-   *
-   * A ref rather than a string for the same reason as the database URL: the
-   * BOM files are private, and a token in plugin config is a token in a
-   * database row and in every settings API response.
-   */
-  configRepoToken: "configRepoToken",
-  /** BigCommerce store hash, used to resolve a BOM's catalog key. */
-  bigcommerceStoreHash: "bigcommerceStoreHash",
-  /** Secret ref holding a BigCommerce API token with product read access. */
-  bigcommerceToken: "bigcommerceToken"
-};
-var DEFAULT_DATABASE_SCHEMA = "inventory";
-var SCHEMA_NAME_PATTERN = "^[a-z_][a-z0-9_]{0,62}$";
-var SUPPORTED_VENDORS = [
-  "mcmaster",
-  "sendcutsend",
-  "amazon",
-  "formlabs"
-];
-var SETTINGS_PATH = "Settings \u2192 Plugins \u2192 Inventory";
-
-// src/errors.ts
-var OperatorFacingError = class extends Error {
-  constructor(message2) {
-    super(message2);
-    this.name = new.target.name;
-  }
-};
-var InputError = class extends OperatorFacingError {
-};
-var StorageError = class extends OperatorFacingError {
-};
-var LedgerError = class extends OperatorFacingError {
-};
-
-// src/config.ts
-var ConfigError = class extends OperatorFacingError {
-};
-var schemaNameRe = new RegExp(SCHEMA_NAME_PATTERN);
-function isSecretRefBinding(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) && value.type === "secret_ref" && typeof value.secretId === "string" && value.secretId.length > 0;
-}
-function parseDatabaseSchema(value) {
-  if (value === void 0 || value === null || value === "") {
-    return DEFAULT_DATABASE_SCHEMA;
-  }
-  if (typeof value !== "string") {
-    throw new ConfigError("The database schema must be text, or left blank.");
-  }
-  const trimmed = value.trim();
-  if (!schemaNameRe.test(trimmed)) {
-    throw new ConfigError(
-      `"${trimmed}" is not a usable schema name. Use lowercase letters, digits and underscores, starting with a letter or underscore \u2014 for example ${DEFAULT_DATABASE_SCHEMA}.`
-    );
-  }
-  return trimmed;
-}
-function parseEnabledVendors(value) {
-  if (value === void 0 || value === null) return [...SUPPORTED_VENDORS];
-  if (!Array.isArray(value)) {
-    throw new ConfigError("Enabled vendors must be a list.");
-  }
-  const unknown2 = value.filter(
-    (entry) => !SUPPORTED_VENDORS.includes(entry)
-  );
-  if (unknown2.length > 0) {
-    throw new ConfigError(
-      `No parser ships for ${unknown2.join(", ")}. Supported vendors are ${SUPPORTED_VENDORS.join(", ")}.`
-    );
-  }
-  return value;
-}
-function parseSettings(config2) {
-  const databaseUrlRef = config2[CONFIG_KEYS.databaseUrl];
-  if (!isSecretRefBinding(databaseUrlRef)) {
-    throw new ConfigError(
-      `This plugin has no database connection configured. Save a PostgreSQL connection string as a Paperclip secret and pick it in ${SETTINGS_PATH}.`
-    );
-  }
-  return {
-    databaseUrlRef,
-    databaseSchema: parseDatabaseSchema(config2[CONFIG_KEYS.databaseSchema]),
-    enabledVendors: parseEnabledVendors(config2[CONFIG_KEYS.enabledVendors])
-  };
-}
-async function resolveConnection(ctx, companyId) {
-  const settings = parseSettings(await ctx.config.get(companyId));
-  const connectionString = await ctx.secrets.resolve(settings.databaseUrlRef, {
-    companyId,
-    configPath: CONFIG_KEYS.databaseUrl
-  });
-  if (!connectionString) {
-    throw new ConfigError(
-      "The configured database connection secret resolved to an empty value."
-    );
-  }
-  return { connectionString, settings };
-}
-
-// src/db.ts
-import { createHash } from "node:crypto";
-import { Pool } from "pg";
-var pools = /* @__PURE__ */ new Map();
-function fingerprintOf(connectionString, schema) {
-  return createHash("sha256").update(`${schema}\0${connectionString}`).digest("hex");
-}
-function quoteIdentifier(name) {
-  if (!new RegExp(SCHEMA_NAME_PATTERN).test(name)) {
-    throw new Error(`Refusing to interpolate unsafe identifier: ${name}`);
-  }
-  return `"${name}"`;
-}
-function createHandle(connectionString, schema) {
-  const pool = new Pool({
-    connectionString,
-    // A plugin worker is shared by every company, so one company's inventory
-    // work must not be able to exhaust the database's connection slots.
-    max: 4,
-    idleTimeoutMillis: 3e4,
-    connectionTimeoutMillis: 1e4,
-    application_name: "paperclip-plugin-inventory"
-  });
-  pool.on("error", () => {
-  });
-  const setSearchPath = `SET LOCAL search_path TO ${quoteIdentifier(schema)}`;
-  return {
-    pool,
-    schema,
-    async transaction(fn) {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(setSearchPath);
-        const result = await fn(client);
-        await client.query("COMMIT");
-        return result;
-      } catch (error62) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-        }
-        throw error62;
-      } finally {
-        client.release();
-      }
-    },
-    async query(sql, params2 = []) {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN READ ONLY");
-        await client.query(setSearchPath);
-        const result = await client.query(sql, params2);
-        await client.query("COMMIT");
-        return result.rows;
-      } catch (error62) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-        }
-        throw error62;
-      } finally {
-        client.release();
-      }
-    }
-  };
-}
-async function getDatabase(companyId, connectionString, schema) {
-  const fingerprint = fingerprintOf(connectionString, schema);
-  const cached2 = pools.get(companyId);
-  if (cached2) {
-    if (cached2.fingerprint === fingerprint) return cached2.handle;
-    pools.delete(companyId);
-    await cached2.handle.pool.end().catch(() => {
-    });
-  }
-  const handle = createHandle(connectionString, schema);
-  pools.set(companyId, { handle, fingerprint });
-  return handle;
-}
-async function closeAllDatabases() {
-  const open2 = [...pools.values()];
-  pools.clear();
-  await Promise.all(open2.map((entry) => entry.handle.pool.end().catch(() => {
-  })));
-}
-
-// src/parts.ts
-var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var VENDOR_KEY = /^[a-z0-9][a-z0-9._-]{0,62}$/;
-var MAX_PART_NUMBER_LENGTH = 128;
-var CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
-function parsePartRef(value) {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new InputError(
-      "A part is required: either a vendor-qualified reference such as vendor-a:part-001, or the part's internal id."
-    );
-  }
-  const trimmed = value.trim();
-  if (UUID.test(trimmed)) return { kind: "id", id: trimmed.toLowerCase() };
-  const separator = trimmed.indexOf(":");
-  if (separator < 0) {
-    throw new InputError(
-      `"${trimmed}" is not a part reference. Use vendor:part-number, for example vendor-a:part-001, or the part's internal id.`
-    );
-  }
-  const vendor = trimmed.slice(0, separator).trim().toLowerCase();
-  const vendorPartNumber = trimmed.slice(separator + 1).trim();
-  if (!VENDOR_KEY.test(vendor)) {
-    throw new InputError(
-      `"${vendor}" is not a usable vendor key. Use lowercase letters, digits, dots, dashes and underscores \u2014 for example mcmaster.`
-    );
-  }
-  if (vendorPartNumber === "") {
-    throw new InputError(`"${trimmed}" names a vendor but no part number.`);
-  }
-  if (vendorPartNumber.length > MAX_PART_NUMBER_LENGTH) {
-    throw new InputError(
-      `That part number is ${vendorPartNumber.length} characters long. A part number is at most ${MAX_PART_NUMBER_LENGTH}; this is probably a description.`
-    );
-  }
-  if (CONTROL_CHARACTERS.test(vendorPartNumber)) {
-    throw new InputError("That part number contains control characters.");
-  }
-  return {
-    kind: "vendor",
-    vendor,
-    vendorPartNumber,
-    // Normalised, so the value we echo back is the value that would match next
-    // time. Only the vendor half is lowercased: the part number keeps the
-    // vendor's own casing, and the database matches it case-insensitively.
-    ref: `${vendor}:${vendorPartNumber}`
-  };
-}
-function formatPartRef(vendor, vendorPartNumber) {
-  return `${vendor}:${vendorPartNumber}`;
-}
-
-// src/quantity.ts
-var QUANTITY_SCALE = 4;
-var MAX_MAGNITUDE = 9999999999;
-var SCALE_FACTOR = 10 ** QUANTITY_SCALE;
-function parseQuantity(value, options) {
-  const { label: label2 } = options;
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new InputError(`${label2} must be a number.`);
-  }
-  if (options.positive && value <= 0) {
-    throw new InputError(`${label2} must be greater than zero.`);
-  }
-  if ((options.nonZero || options.positive) && value === 0) {
-    throw new InputError(
-      `${label2} cannot be zero \u2014 a movement of nothing is not a movement.`
-    );
-  }
-  if (Math.abs(value) > MAX_MAGNITUDE) {
-    throw new InputError(`${label2} is larger than this inventory can store.`);
-  }
-  const scaled2 = value * SCALE_FACTOR;
-  if (Math.abs(scaled2 - Math.round(scaled2)) > 1e-6) {
-    throw new InputError(
-      `${label2} has more than ${QUANTITY_SCALE} decimal places. Stock is stored to ${QUANTITY_SCALE} decimals, and rounding it quietly is how a ledger stops being trustworthy.`
-    );
-  }
-  return Math.round(scaled2) / SCALE_FACTOR;
-}
-function toNumber(value) {
-  if (value === null || value === void 0) return 0;
-  if (typeof value === "number") return value;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Expected a numeric value from the database, got ${String(value)}`);
-  }
-  return Math.round(parsed * SCALE_FACTOR) / SCALE_FACTOR;
-}
-
-// src/ledger.ts
-var UNIQUE_VIOLATION = "23505";
-function idempotencyKey(...parts) {
-  return JSON.stringify(parts);
-}
-var ENTRY_COLUMNS = `id, part_id, entry_type, quantity_delta, on_hand_delta,
-  on_order_delta, reference, idempotency_key, note, unit_cost, created_at, created_by`;
-function toEntry(row) {
-  return {
-    id: String(row.id),
-    partId: row.part_id,
-    entryType: row.entry_type,
-    quantityDelta: toNumber(row.quantity_delta),
-    onHandDelta: toNumber(row.on_hand_delta),
-    onOrderDelta: toNumber(row.on_order_delta),
-    reference: row.reference,
-    idempotencyKey: row.idempotency_key,
-    note: row.note,
-    unitCost: row.unit_cost === null ? null : toNumber(row.unit_cost),
-    createdAt: row.created_at,
-    createdBy: row.created_by
-  };
-}
-function toStock(row) {
-  const vendor = row.vendor;
-  const vendorPartNumber = row.vendor_part_number;
-  return {
-    partId: row.part_id,
-    ref: formatPartRef(vendor, vendorPartNumber),
-    vendor,
-    vendorPartNumber,
-    description: row.description ?? null,
-    unitOfMeasure: row.unit_of_measure,
-    onHand: toNumber(row.on_hand),
-    onOrder: toNumber(row.on_order),
-    committed: toNumber(row.committed),
-    available: toNumber(row.available),
-    lastEntryAt: row.last_entry_at ?? null
-  };
-}
-async function resolvePart(client, part, options) {
-  if (part.kind === "id") {
-    const { rows } = await client.query(
-      "SELECT id, vendor, vendor_part_number FROM parts WHERE id = $1",
-      [part.id]
-    );
-    const row2 = rows[0];
-    if (!row2) {
-      throw new InputError(
-        `No part has the id ${part.id}. Use a vendor-qualified reference such as vendor-a:part-001 if this part is new.`
-      );
-    }
-    return {
-      partId: row2.id,
-      vendor: row2.vendor,
-      vendorPartNumber: row2.vendor_part_number,
-      ref: formatPartRef(row2.vendor, row2.vendor_part_number)
-    };
-  }
-  const lookup = `SELECT id, vendor, vendor_part_number FROM parts
-      WHERE vendor = $1 AND lower(vendor_part_number) = lower($2)`;
-  const existing = await client.query(lookup, [part.vendor, part.vendorPartNumber]);
-  if (existing.rows[0]) {
-    const row2 = existing.rows[0];
-    return {
-      partId: row2.id,
-      vendor: row2.vendor,
-      vendorPartNumber: row2.vendor_part_number,
-      ref: formatPartRef(row2.vendor, row2.vendor_part_number)
-    };
-  }
-  if (!options.create) {
-    throw new InputError(
-      `This inventory has no part ${part.ref}. Record a receipt or an adjustment for it first, or check the part number.`
-    );
-  }
-  await client.query(
-    `INSERT INTO parts (vendor, vendor_part_number, description, unit_of_measure)
-     VALUES ($1, $2, $3, COALESCE($4, 'each'))
-     ON CONFLICT DO NOTHING`,
-    [part.vendor, part.vendorPartNumber, options.description ?? null, options.unitOfMeasure ?? null]
-  );
-  const created = await client.query(lookup, [part.vendor, part.vendorPartNumber]);
-  const row = created.rows[0];
-  if (!row) {
-    throw new LedgerError(`The part ${part.ref} could not be created.`);
-  }
-  return {
-    partId: row.id,
-    vendor: row.vendor,
-    vendorPartNumber: row.vendor_part_number,
-    ref: formatPartRef(row.vendor, row.vendor_part_number)
-  };
-}
-async function outstandingOnOrder(client, partId, reference) {
-  const { rows } = await client.query(
-    `SELECT COALESCE(SUM(on_order_delta), 0) AS outstanding
-       FROM ledger_entries WHERE part_id = $1 AND reference = $2`,
-    [partId, reference]
-  );
-  return Math.max(toNumber(rows[0]?.outstanding), 0);
-}
-async function currentOnHand(client, partId) {
-  const { rows } = await client.query(
-    "SELECT COALESCE(SUM(on_hand_delta), 0) AS on_hand FROM ledger_entries WHERE part_id = $1",
-    [partId]
-  );
-  return toNumber(rows[0]?.on_hand);
-}
-async function readStockFor(client, partId) {
-  const { rows } = await client.query("SELECT * FROM part_stock WHERE part_id = $1", [partId]);
-  if (!rows[0]) throw new LedgerError("The part disappeared while it was being written.");
-  return toStock(rows[0]);
-}
-async function findByIdempotencyKey(client, key) {
-  const { rows } = await client.query(
-    `SELECT ${ENTRY_COLUMNS} FROM ledger_entries WHERE idempotency_key = $1`,
-    [key]
-  );
-  return rows[0] ? toEntry(rows[0]) : void 0;
-}
-function bucketsFor(entryType, quantity2, outstanding) {
-  switch (entryType) {
-    case "purchase":
-      return { quantityDelta: quantity2, onHandDelta: 0, onOrderDelta: quantity2 };
-    case "receipt":
-      return {
-        quantityDelta: quantity2,
-        onHandDelta: quantity2,
-        onOrderDelta: -Math.min(quantity2, outstanding)
-      };
-    case "sale":
-      return { quantityDelta: -quantity2, onHandDelta: -quantity2, onOrderDelta: 0 };
-    case "adjustment":
-      return { quantityDelta: quantity2, onHandDelta: quantity2, onOrderDelta: 0 };
-  }
-}
-async function appendEntry(db, input2, transactionClient) {
-  if (input2.entryType !== "adjustment" && input2.quantity <= 0) {
-    throw new InputError(`A ${input2.entryType} quantity must be greater than zero.`);
-  }
-  if (input2.entryType === "adjustment" && input2.quantity === 0) {
-    throw new InputError("An adjustment of zero changes nothing.");
-  }
-  const reference = input2.reference.trim();
-  if (reference === "") {
-    throw new InputError("A reference is required: it is what makes this entry traceable.");
-  }
-  let attemptedKey;
-  const transact = transactionClient ? async (fn) => fn(transactionClient) : db.transaction.bind(db);
-  const write2 = async () => transact(async (client) => {
-    const part = await resolvePart(client, input2.part, {
-      create: input2.createMissingPart === true,
-      description: input2.description,
-      unitOfMeasure: input2.unitOfMeasure
-    });
-    const key = input2.idempotencyScope ? idempotencyKey(...input2.idempotencyScope, part.partId, reference) : void 0;
-    attemptedKey = key;
-    await client.query("SELECT id FROM parts WHERE id = $1 FOR UPDATE", [part.partId]);
-    if (key) {
-      const existing = await findByIdempotencyKey(client, key);
-      if (existing) {
-        return {
-          entry: existing,
-          part,
-          duplicate: true,
-          stock: await readStockFor(client, part.partId)
-        };
-      }
-    }
-    const outstanding = input2.entryType === "receipt" ? await outstandingOnOrder(client, part.partId, reference) : 0;
-    const deltas = bucketsFor(input2.entryType, input2.quantity, outstanding);
-    if (deltas.onHandDelta < 0 && input2.entryType !== "adjustment") {
-      const onHand = await currentOnHand(client, part.partId);
-      if (onHand + deltas.onHandDelta < 0) {
-        throw new LedgerError(
-          `That ${input2.entryType} would leave ${part.ref} at ${onHand + deltas.onHandDelta}, and on-hand cannot go negative. On hand is ${onHand}. Record an adjustment if the count really is wrong.`
-        );
-      }
-    }
-    const { rows } = await client.query(
-      `INSERT INTO ledger_entries
-           (part_id, entry_type, quantity_delta, on_hand_delta, on_order_delta,
-            unit_cost, reference, idempotency_key, note, provenance, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
-         RETURNING ${ENTRY_COLUMNS}`,
-      [
-        part.partId,
-        input2.entryType,
-        deltas.quantityDelta,
-        deltas.onHandDelta,
-        deltas.onOrderDelta,
-        input2.unitCost ?? null,
-        reference,
-        key ?? null,
-        input2.note ?? null,
-        JSON.stringify(input2.provenance),
-        input2.createdBy
-      ]
-    );
-    return {
-      entry: toEntry(rows[0]),
-      part,
-      duplicate: false,
-      stock: await readStockFor(client, part.partId)
-    };
-  });
-  try {
-    return await write2();
-  } catch (error62) {
-    if (!transactionClient && attemptedKey && error62?.code === UNIQUE_VIOLATION) {
-      const key = attemptedKey;
-      const existing = await db.transaction(async (client) => {
-        const entry = await findByIdempotencyKey(client, key);
-        if (!entry) return void 0;
-        return {
-          entry,
-          part: await partOf(client, entry.partId),
-          duplicate: true,
-          stock: await readStockFor(client, entry.partId)
-        };
-      });
-      if (existing) return existing;
-    }
-    throw error62;
-  }
-}
-async function partOf(client, partId) {
-  const { rows } = await client.query(
-    "SELECT id, vendor, vendor_part_number FROM parts WHERE id = $1",
-    [partId]
-  );
-  const row = rows[0];
-  if (!row) throw new LedgerError(`Part ${partId} is referenced by a ledger entry but missing.`);
-  return {
-    partId: row.id,
-    vendor: row.vendor,
-    vendorPartNumber: row.vendor_part_number,
-    ref: formatPartRef(row.vendor, row.vendor_part_number)
-  };
-}
-async function readStock(db, part) {
-  if (!part) {
-    const rows2 = await db.query("SELECT * FROM part_stock ORDER BY vendor, vendor_part_number");
-    return rows2.map(toStock);
-  }
-  const rows = part.kind === "id" ? await db.query("SELECT * FROM part_stock WHERE part_id = $1", [part.id]) : await db.query(
-    `SELECT * FROM part_stock
-             WHERE vendor = $1 AND lower(vendor_part_number) = lower($2)`,
-    [part.vendor, part.vendorPartNumber]
-  );
-  return rows.map(toStock);
-}
-
-// src/storage.ts
-import { readdir as readdir2 } from "node:fs/promises";
-import path3 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-// src/migrate.ts
-import { createHash as createHash2 } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
-import path2 from "node:path";
-var ADVISORY_LOCK_KEY = BigInt(
-  `0x${createHash2("sha256").update("paperclip-plugin-inventory").digest("hex").slice(0, 8)}`
-).toString();
-function checksumOf(sql) {
-  return createHash2("sha256").update(sql).digest("hex");
-}
-async function loadMigrations(dir) {
-  const entries2 = await readdir(dir, { withFileTypes: true });
-  const files = entries2.filter((entry) => entry.isFile() && entry.name.endsWith(".sql")).map((entry) => entry.name).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
-  const prefixes = /* @__PURE__ */ new Set();
-  const migrations = [];
-  for (const file3 of files) {
-    const key = file3.slice(0, -4);
-    const prefix = key.split("_")[0] ?? key;
-    if (prefixes.has(prefix)) {
-      throw new Error(
-        `Two migrations share the prefix "${prefix}". Renumber one of them; the prefix is what fixes the order.`
-      );
-    }
-    prefixes.add(prefix);
-    const sql = await readFile(path2.join(dir, file3), "utf8");
-    migrations.push({ key, sql, checksum: checksumOf(sql) });
-  }
-  return migrations;
-}
-async function migrate(db, migrationsDir) {
-  const migrations = await loadMigrations(migrationsDir);
-  const schema = quoteIdentifier(db.schema);
-  const client = await db.pool.connect();
-  const applied = [];
-  try {
-    await client.query("SELECT pg_advisory_lock($1::bigint)", [ADVISORY_LOCK_KEY]);
-    await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ${schema}.schema_migrations (
-        key text PRIMARY KEY,
-        checksum text NOT NULL,
-        applied_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-    const { rows } = await client.query(
-      `SELECT key, checksum FROM ${schema}.schema_migrations`
-    );
-    const seen = new Map(rows.map((row) => [row.key, row.checksum]));
-    for (const migration of migrations) {
-      const previous = seen.get(migration.key);
-      if (previous !== void 0) {
-        if (previous !== migration.checksum) {
-          throw new Error(
-            `Migration ${migration.key} has already been applied but its contents have changed. Applied migrations are history: add a new migration instead of editing this one.`
-          );
-        }
-        continue;
-      }
-      await client.query("BEGIN");
-      try {
-        await client.query(`SET LOCAL search_path TO ${schema}`);
-        await client.query(migration.sql);
-        await client.query(
-          `INSERT INTO ${schema}.schema_migrations (key, checksum) VALUES ($1, $2)`,
-          [migration.key, migration.checksum]
-        );
-        await client.query("COMMIT");
-      } catch (error62) {
-        try {
-          await client.query("ROLLBACK");
-        } catch {
-        }
-        throw new Error(
-          `Migration ${migration.key} failed: ${error62 instanceof Error ? error62.message : String(error62)}`
-        );
-      }
-      applied.push(migration.key);
-    }
-  } finally {
-    try {
-      await client.query("SELECT pg_advisory_unlock($1::bigint)", [ADVISORY_LOCK_KEY]);
-    } catch {
-    }
-    client.release();
-  }
-  return applied;
-}
-
-// src/storage.ts
-function migrationsDirectory() {
-  return path3.resolve(path3.dirname(fileURLToPath2(import.meta.url)), "..", "migrations");
-}
-var migrated = /* @__PURE__ */ new WeakMap();
-async function loadMigrationFiles(dir) {
-  try {
-    const files = await readdir2(dir);
-    if (!files.some((name) => name.endsWith(".sql"))) {
-      throw new Error("no .sql files");
-    }
-  } catch {
-    throw new StorageError(
-      `This installation of the inventory plugin is missing its migrations directory (expected at ${dir}). Reinstall the plugin.`
-    );
-  }
-}
-async function ensureMigrated(db) {
-  const inFlight = migrated.get(db);
-  if (inFlight) return inFlight;
-  const run = migrate(db, migrationsDirectory()).then(() => void 0);
-  migrated.set(db, run);
-  try {
-    await run;
-  } catch (error62) {
-    migrated.delete(db);
-    throw error62;
-  }
-}
-async function openStore(ctx, companyId) {
-  const { connectionString, settings } = await resolveConnection(ctx, companyId);
-  let db;
-  try {
-    db = await getDatabase(companyId, connectionString, settings.databaseSchema);
-  } catch (error62) {
-    ctx.logger.error("Could not open the inventory database", {
-      companyId,
-      reason: error62?.message
-    });
-    throw new StorageError(
-      `The inventory database could not be opened. Check the connection secret in ${SETTINGS_PATH}.`
-    );
-  }
-  await loadMigrationFiles(migrationsDirectory());
-  try {
-    await ensureMigrated(db);
-  } catch (error62) {
-    ctx.logger.error("Inventory migrations failed", {
-      companyId,
-      schema: settings.databaseSchema,
-      reason: error62?.message
-    });
-    throw new StorageError(
-      `The inventory database could not be brought up to date. The plugin log has the failing migration; check that the connection in ${SETTINGS_PATH} can create tables in the "${settings.databaseSchema}" schema.`
-    );
-  }
-  return db;
-}
+// src/worker.ts
+init_config();
+init_constants();
+init_db();
+init_errors();
 
 // src/handlers.ts
+init_errors();
+init_ledger();
+init_parts();
+init_quantity();
+init_storage();
 var MAX_TEXT = 500;
 var CONTROL_CHARACTERS2 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 function params(value) {
@@ -42926,7 +43478,16 @@ ${rows.map(stockSummary).join("\n")}`;
   };
 }
 
+// src/intake.ts
+init_errors();
+init_ledger();
+init_parts();
+init_config();
+init_storage();
+
 // src/extraction.ts
+init_errors();
+init_parts();
 function object2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new InputError("Parameters must be an object.");
   return value;
@@ -42999,6 +43560,7 @@ function reconcile(x) {
 }
 
 // src/parsers/table.ts
+init_errors();
 function parseTable(raw) {
   const orderNumber = raw.match(/^Order(?:\s+Number\s*:|\s*#\s*:?|\s*:)\s*([\w-]+)\s*$/mi)?.[1];
   const orderDate = raw.match(/^(?:Order Date|Date)\s*:\s*(\d{4}-\d{2}-\d{2})\s*$/mi)?.[1];
@@ -43019,6 +43581,7 @@ function parseTable(raw) {
 }
 
 // src/parsers/mcmaster.ts
+init_errors();
 function cells(row) {
   const trimmed = row.trim();
   if (trimmed.length < 2 || !trimmed.startsWith("|") || !trimmed.endsWith("|")) return void 0;
@@ -43121,6 +43684,7 @@ var mcmaster = {
 };
 
 // src/parsers/sendcutsend.ts
+init_errors();
 function sendCutSendOrderNumber(raw) {
   return /^ORDER\s+([0-9A-Za-z][0-9A-Za-z-]*)\s*$/mi.exec(raw)?.[1] ?? /\bSendCutSend\s+Order\s+([0-9A-Za-z][0-9A-Za-z-]*)\b/i.exec(raw)?.[1];
 }
@@ -43327,251 +43891,18 @@ async function resolveReviewItem(ctx, raw, run) {
   return { content: `Review item ${result.status}.`, data: result };
 }
 
-// src/bom.ts
-import { createHash as createHash3 } from "node:crypto";
-import { parse as parseYaml } from "yaml";
-var PRODUCT_KEY = /^product-[0-9]+$/;
-var VARIANT_SKU = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-var PART_REF = /^[a-z0-9][a-z0-9._-]*:[^\s][^\u0000-\u001f]{0,127}$/;
-var QUANTITY_SCALE2 = 4;
-var MAX_QUANTITY = 1e6;
-var MAX_TEXT2 = 500;
-var CONTROL_CHARACTERS3 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-function text3(value, label2, problems, max = MAX_TEXT2) {
-  if (typeof value !== "string" || value.trim() === "") {
-    problems.push(`${label2} is required`);
-    return void 0;
-  }
-  if (value.length > max) {
-    problems.push(`${label2} is longer than ${max} characters`);
-    return void 0;
-  }
-  if (CONTROL_CHARACTERS3.test(value)) {
-    problems.push(`${label2} contains control characters`);
-    return void 0;
-  }
-  return value.trim();
-}
-function quantity(value, label2, problems) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    problems.push(`${label2} must be a positive number, found ${JSON.stringify(value)}`);
-    return void 0;
-  }
-  if (value > MAX_QUANTITY) {
-    problems.push(`${label2} is ${value}; a per-unit quantity that large is a typo`);
-    return void 0;
-  }
-  if (Number(value.toFixed(QUANTITY_SCALE2)) !== value) {
-    problems.push(`${label2} has more than ${QUANTITY_SCALE2} decimal places`);
-    return void 0;
-  }
-  return value;
-}
-function pendingOf(value, label2, problems) {
-  if (value === void 0 || value === null) return [];
-  const entries2 = Array.isArray(value) ? value : [value];
-  const reasons = [];
-  for (const [index, entry] of entries2.entries()) {
-    const reason = text3(entry, `${label2}[${index}]`, problems, 1e3);
-    if (reason) reasons.push(reason);
-  }
-  if (reasons.length === 0) problems.push(`${label2} must say what is unresolved`);
-  return reasons;
-}
-function parseLines(raw, where, scope, problems, seen, { allowEmpty = false } = {}) {
-  if (allowEmpty && Array.isArray(raw) && raw.length === 0) return [];
-  if (!Array.isArray(raw) || raw.length === 0) {
-    problems.push(`${where} must list at least one line`);
-    return [];
-  }
-  const lines = [];
-  for (const [index, entry] of raw.entries()) {
-    const at = `${where}[${index}]`;
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      problems.push(`${at} is not a mapping`);
-      continue;
-    }
-    const line = entry;
-    const pending = pendingOf(line.pending, `${at} pending`, problems);
-    const description = text3(line.customer_description, `${at} customer_description`, problems);
-    let qty;
-    if (line.qty === void 0 || line.qty === null) {
-      if (pending.length === 0) {
-        problems.push(`${at} needs a qty, or a pending reason saying why it has none yet`);
-      }
-    } else {
-      qty = quantity(line.qty, `${at} qty`, problems);
-      if (qty === void 0) continue;
-    }
-    let part;
-    if (line.part === void 0 || line.part === null) {
-      if (pending.length === 0) {
-        problems.push(`${at} needs a part, or a pending reason saying why it has none yet`);
-      }
-    } else if (typeof line.part !== "string" || !PART_REF.test(line.part)) {
-      problems.push(`${at} part must look like vendor:part-number, found ${JSON.stringify(line.part)}`);
-    } else {
-      part = line.part.trim();
-      const key = `${scope.optionName ?? ""}\0${scope.optionValue ?? ""}\0${part.toLowerCase()}`;
-      if (seen.has(key)) problems.push(`${at} lists ${part} twice in the same option scope`);
-      seen.add(key);
-    }
-    const sourceLineId = line.source_line_id === void 0 ? void 0 : text3(line.source_line_id, `${at} source_line_id`, problems, 120);
-    if (description === void 0) continue;
-    lines.push({
-      ...part ? { part } : {},
-      ...qty === void 0 ? {} : { qty },
-      customerDescription: description,
-      ...scope.optionName ? { optionName: scope.optionName, optionValue: scope.optionValue } : {},
-      ...sourceLineId ? { sourceLineId } : {},
-      pending
-    });
-  }
-  return lines;
-}
-function validateBom(fileName, document2) {
-  const problems = [];
-  if (document2 === null || typeof document2 !== "object" || Array.isArray(document2)) {
-    return { problems: ["is empty or is not a mapping"] };
-  }
-  const raw = document2;
-  const expectedKey = fileName.replace(/\.ya?ml$/, "");
-  const catalogKey = text3(raw.catalog_key, "catalog_key", problems, 64);
-  if (catalogKey !== void 0 && catalogKey !== expectedKey) {
-    problems.push(`catalog_key "${catalogKey}" does not match the file name "${expectedKey}"`);
-  }
-  let catalogKeyKind;
-  if (catalogKey !== void 0) {
-    const inferred = PRODUCT_KEY.test(catalogKey) ? "product_id" : VARIANT_SKU.test(catalogKey) ? "variant_sku" : void 0;
-    if (!inferred) {
-      problems.push(
-        `catalog_key "${catalogKey}" is neither a variant SKU nor product-<id>. Use the variant SKU when the product has one; otherwise product-<BigCommerce product id>.`
-      );
-    } else if (raw.catalog_key_kind !== void 0 && raw.catalog_key_kind !== inferred) {
-      problems.push(
-        `catalog_key_kind says ${JSON.stringify(raw.catalog_key_kind)} but "${catalogKey}" is a ${inferred}`
-      );
-    } else {
-      catalogKeyKind = inferred;
-    }
-  }
-  const status = raw.status === void 0 ? "active" : raw.status;
-  if (status !== "active" && status !== "draft") {
-    problems.push(`status must be "active" or "draft", found ${JSON.stringify(raw.status)}`);
-  }
-  const installDocument = raw.install_document === void 0 ? void 0 : text3(raw.install_document, "install_document", problems, 300);
-  if (installDocument !== void 0 && !/^install-instructions\/[^/\\\s]+\.MD$/.test(installDocument)) {
-    problems.push(
-      `install_document "${installDocument}" is not an install-instructions/<name>.MD path in the documentation repository`
-    );
-  }
-  const sourceRevision = raw.source_revision === void 0 ? void 0 : text3(raw.source_revision, "source_revision", problems, 64);
-  const seen = /* @__PURE__ */ new Set();
-  const lines = parseLines(raw.lines, "lines", {}, problems, seen);
-  if (raw.unresolved_lines !== void 0) {
-    const unresolvedLines = parseLines(raw.unresolved_lines, "unresolved_lines", {}, problems, /* @__PURE__ */ new Set(), { allowEmpty: true });
-    lines.push(...unresolvedLines.map((line) => ({ ...line, inclusionPending: true })));
-    if (status !== "draft" && unresolvedLines.length > 0) {
-      problems.push("unresolved_lines have no confirmed inclusion rule and cannot be active; move them into lines or exact option scopes after confirmation");
-    }
-  }
-  const optionScopes = [];
-  if (raw.options !== void 0) {
-    if (!Array.isArray(raw.options)) {
-      problems.push("options must be a list");
-    } else {
-      const scopes = /* @__PURE__ */ new Set();
-      for (const [index, entry] of raw.options.entries()) {
-        const at = `options[${index}]`;
-        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-          problems.push(`${at} is not a mapping`);
-          continue;
-        }
-        const option = entry;
-        const optionName = text3(option.bigcommerce_option, `${at} bigcommerce_option`, problems, 250);
-        const optionValue = text3(option.option_value, `${at} option_value`, problems, 250);
-        if (optionName === void 0 || optionValue === void 0) continue;
-        const scope = `${optionName}\0${optionValue}`;
-        if (scopes.has(scope)) {
-          problems.push(`${at} repeats the option value "${optionName}: ${optionValue}"`);
-        }
-        scopes.add(scope);
-        optionScopes.push({ optionName, optionValue });
-        lines.push(
-          ...parseLines(option.lines, `${at} lines`, { optionName, optionValue }, problems, seen, {
-            allowEmpty: true
-          })
-        );
-      }
-    }
-  }
-  const unresolved = lines.filter((line) => line.pending.length > 0 || line.inclusionPending);
-  if (status === "active" && unresolved.length > 0) {
-    problems.push(
-      `${unresolved.length} line(s) are still pending, so this BOM cannot be active. Resolve them, or set status: draft.`
-    );
-  }
-  if (status === "draft" && unresolved.length === 0) {
-    problems.push("status: draft with nothing pending. Set status: active to put this BOM into use.");
-  }
-  if (problems.length > 0 || catalogKey === void 0 || catalogKeyKind === void 0) {
-    return { problems };
-  }
-  return {
-    bom: {
-      fileName,
-      catalogKey,
-      catalogKeyKind,
-      status,
-      ...installDocument ? { installDocument } : {},
-      ...sourceRevision ? { sourceRevision } : {},
-      lines,
-      optionScopes
-    },
-    problems
-  };
-}
-function parseBom(fileName, yamlText) {
-  let document2;
-  try {
-    document2 = parseYaml(yamlText);
-  } catch (error62) {
-    return { problems: [`is not valid YAML: ${error62.message}`] };
-  }
-  return validateBom(fileName, document2);
-}
-function contentHash(bom) {
-  const canonical = (rows) => [...rows].sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1);
-  const lines = canonical(
-    bom.lines.map((line) => [
-      line.optionName ?? "",
-      line.optionValue ?? "",
-      line.part ?? "",
-      line.qty,
-      line.customerDescription
-    ])
-  );
-  const scopes = canonical(bom.optionScopes.map((s) => [s.optionName, s.optionValue]));
-  return createHash3("sha256").update(JSON.stringify([bom.catalogKey, bom.catalogKeyKind, lines, scopes])).digest("hex");
-}
-function selectLines(bom, selections) {
-  const chosen = new Set(selections.map((s) => `${s.option}\0${s.value}`));
-  const declared = new Set(bom.optionScopes.map((s) => `${s.optionName}\0${s.optionValue}`));
-  const names = new Set(bom.optionScopes.map((s) => s.optionName));
-  return {
-    lines: bom.lines.filter(
-      (line) => !line.inclusionPending && (line.optionName === void 0 || chosen.has(`${line.optionName}\0${line.optionValue}`))
-    ),
-    missing: [...names].filter((name) => !selections.some((s) => s.option === name)),
-    conflicting: [...names].filter((name) => new Set(selections.filter((s) => s.option === name).map((s) => s.value)).size > 1),
-    unmatched: selections.filter(
-      (s) => names.has(s.option) && !declared.has(`${s.option}\0${s.value}`)
-    ),
-    ignored: selections.filter((s) => !names.has(s.option))
-  };
-}
+// src/bridge.ts
+init_errors();
+init_bom();
+init_sales();
+init_ledger();
+init_parts();
+init_storage();
 
 // src/catalog.ts
+init_config();
+init_constants();
+init_errors();
 var CatalogError = class extends OperatorFacingError {
 };
 var STORE_HASH = /^[a-z0-9]{5,30}$/;
@@ -43654,7 +43985,499 @@ async function readCatalog(ctx, companyId, settings) {
   return index;
 }
 
+// src/bigcommerce.ts
+init_config();
+init_errors();
+var BridgeApiError = class extends OperatorFacingError {
+};
+async function bigcommerceClient(ctx, companyId) {
+  const config2 = await ctx.config.get(companyId);
+  const settings = parseCatalogSettings(config2);
+  const binding = config2.bigcommerceBridgeToken;
+  if (!isSecretRefBinding(binding))
+    throw new ConfigError(
+      "Select a BigCommerce bridge token secret with Orders read and Products modify access."
+    );
+  const token = await ctx.secrets.resolve(binding, {
+    companyId,
+    configPath: "bigcommerceBridgeToken"
+  });
+  if (!token) throw new ConfigError("BigCommerce bridge token is empty.");
+  const base = `https://api.bigcommerce.com/stores/${settings.storeHash}`;
+  async function request(path4, method = "GET", body) {
+    const response = await fetch(base + path4, {
+      method,
+      redirect: "error",
+      signal: AbortSignal.timeout(3e4),
+      headers: {
+        "X-Auth-Token": token,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      ...body === void 0 ? {} : { body: JSON.stringify(body) }
+    });
+    if (!response.ok)
+      throw new BridgeApiError(
+        `BigCommerce bridge request failed (HTTP ${response.status}); local progress is retained. Retry reconciliation.`
+      );
+    if (response.status === 204) return [];
+    return response.json();
+  }
+  async function pages(path4, v3 = false) {
+    const all = [];
+    for (let page2 = 1; page2 <= 100; page2++) {
+      const body = await request(
+        `${path4}${path4.includes("?") ? "&" : "?"}limit=250&page=${page2}`
+      );
+      const rows = v3 ? body.data : body;
+      if (!Array.isArray(rows))
+        throw new BridgeApiError(
+          "BigCommerce returned an invalid page; cursor unchanged."
+        );
+      all.push(...rows);
+      if (v3 ? page2 >= Number(
+        body.meta?.pagination?.total_pages ?? (rows.length < 250 ? page2 : page2 + 1)
+      ) : rows.length < 250)
+        return all;
+    }
+    throw new BridgeApiError(
+      "BigCommerce pagination limit reached; narrow the reconciliation range. Cursor unchanged."
+    );
+  }
+  return {
+    async orders(since) {
+      const orders = await pages(
+        `/v2/orders?min_date_modified=${encodeURIComponent(new Date(since).toISOString())}&sort=id:asc`
+      );
+      const snapshots = [];
+      for (const order of orders) {
+        if (order.status_id === 0) continue;
+        if (!Number.isSafeInteger(order.id) || order.id <= 0)
+          throw new BridgeApiError("Invalid order identity.");
+        if (!Number.isInteger(order.status_id) || order.status_id < 0 || order.status_id > 14)
+          throw new BridgeApiError("Unknown order status; cursor unchanged.");
+        const lines = await pages(`/v2/orders/${order.id}/products`);
+        const current = await request(`/v2/orders/${order.id}`);
+        if (current.date_modified !== order.date_modified || current.status_id !== order.status_id || current.is_deleted !== order.is_deleted)
+          throw new BridgeApiError(
+            "An order changed while being read; retry reconciliation. Cursor unchanged."
+          );
+        for (const line of lines) {
+          if (line.type && line.type !== "physical") continue;
+          if (!Number.isSafeInteger(line.id) || !Number.isSafeInteger(line.product_id) || line.product_id <= 0)
+            throw new BridgeApiError(
+              "Custom or invalid physical order line requires an explicit mapping."
+            );
+          const sku = typeof line.sku === "string" ? line.sku.trim() : "";
+          snapshots.push({
+            orderId: String(order.id),
+            lineId: String(line.id),
+            catalogKey: sku || `product-${line.product_id}`,
+            options: (line.product_options ?? []).map((o) => {
+              if (typeof o.display_name !== "string" || typeof o.display_value !== "string")
+                throw new BridgeApiError("Invalid order option labels.");
+              return { option: o.display_name, value: o.display_value };
+            }),
+            ordered: line.quantity,
+            shipped: line.quantity_shipped,
+            refunded: line.quantity_refunded,
+            cancelled: [5, 6].includes(order.status_id) || order.is_deleted === true,
+            observedAt: new Date(order.date_modified).toISOString()
+          });
+        }
+      }
+      return { snapshots, orderIds: orders.map((o) => String(o.id)) };
+    },
+    async push(key, quantity2) {
+      if (/^product-[0-9]+$/.test(key)) {
+        const id = key.slice(8);
+        const result = await request(`/v3/catalog/products/${id}`);
+        if (result.data?.inventory_tracking !== "product")
+          throw new InputError(
+            `Catalog key ${key} requires product inventory tracking before stock can be pushed.`
+          );
+        await request(`/v3/catalog/products/${id}`, "PUT", {
+          inventory_level: quantity2
+        });
+      } else {
+        const variants = await pages(
+          `/v3/catalog/variants?sku=${encodeURIComponent(key)}`,
+          true
+        );
+        const matches = variants.filter((v2) => v2.sku === key);
+        if (matches.length !== 1)
+          throw new InputError(
+            `Catalog key ${key} must resolve to exactly one variant.`
+          );
+        const v = matches[0];
+        const product = await request(`/v3/catalog/products/${v.product_id}`);
+        if (product.data?.inventory_tracking !== "variant")
+          throw new InputError(
+            `Catalog key ${key} requires variant inventory tracking before stock can be pushed.`
+          );
+        await request(
+          `/v3/catalog/products/${v.product_id}/variants/${v.id}`,
+          "PUT",
+          { inventory_level: quantity2 }
+        );
+      }
+    }
+  };
+}
+
+// src/bridge.ts
+var round = (n) => Math.round(n * 1e4) / 1e4;
+var canonicalOptions = (options) => [...options].sort(
+  (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))
+);
+async function applyOrderLine(db, input2, run, dryRun = false) {
+  for (const n of [input2.ordered, input2.shipped, input2.refunded]) {
+    if (!Number.isSafeInteger(n) || n < 0 || n > 1e6)
+      throw new InputError("Invalid order quantities.");
+  }
+  if (!input2.ordered || input2.shipped > input2.ordered || input2.refunded > input2.ordered || !Number.isFinite(Date.parse(input2.observedAt))) {
+    throw new InputError("Invalid order snapshot.");
+  }
+  return db.transaction(async (client) => {
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('inventory-bigcommerce-lines'))"
+    );
+    const found = await client.query(
+      "SELECT * FROM bigcommerce_lines WHERE order_id=$1 AND line_id=$2 FOR UPDATE",
+      [input2.orderId, input2.lineId]
+    );
+    const prior = found.rows[0];
+    const snapshot = {
+      ...input2,
+      options: canonicalOptions(input2.options),
+      observedAt: new Date(input2.observedAt).toISOString()
+    };
+    if (prior && Date.parse(input2.observedAt) < new Date(prior.observed_at).getTime())
+      return { stale: true };
+    const identity = {
+      catalogKey: input2.catalogKey,
+      ordered: input2.ordered,
+      options: canonicalOptions(input2.options)
+    };
+    let expansion;
+    let bomId;
+    if (prior) {
+      if (prior.identity.catalogKey !== identity.catalogKey || prior.identity.ordered !== identity.ordered || JSON.stringify(
+        prior.identity.options.map((o) => [
+          o.option,
+          o.value
+        ])
+      ) !== JSON.stringify(identity.options.map((o) => [o.option, o.value]))) {
+        throw new InputError(
+          "An existing order line changed product, quantity or options; resolve it explicitly before reconciliation."
+        );
+      }
+      if (Date.parse(input2.observedAt) === new Date(prior.observed_at).getTime()) {
+        const before = [
+          Number(prior.shipped),
+          Number(prior.refunded),
+          Number(prior.snapshot.cancelled)
+        ];
+        const after = [input2.shipped, input2.refunded, Number(input2.cancelled)];
+        if (after.every((value, i) => value === before[i]))
+          return { duplicate: true };
+        if (after.every((value, i) => value <= before[i]))
+          return { stale: true };
+        if (!after.every((value, i) => value >= before[i]))
+          throw new InputError(
+            "Conflicting order snapshots at the same modification time; resolve incomparable progress explicitly."
+          );
+      }
+      if (input2.shipped < prior.shipped || input2.refunded < prior.refunded || prior.closed && !input2.cancelled && input2.refunded !== input2.ordered) {
+        throw new InputError(
+          "Order counters or terminal state regressed; nothing changed."
+        );
+      }
+      expansion = prior.expansion;
+      bomId = prior.bom_id;
+    } else {
+      const active = await readActiveBom(client, input2.catalogKey);
+      if (!active)
+        throw new InputError(
+          `No active BOM for ${input2.catalogKey}; order reconciliation stopped.`
+        );
+      const chosen = selectLines(active.bom, input2.options);
+      if (chosen.missing.length || chosen.conflicting.length || chosen.unmatched.length || !chosen.lines.length)
+        throw new InputError(
+          "Order options do not resolve exactly against the active BOM."
+        );
+      const parts = /* @__PURE__ */ new Map();
+      for (const line of chosen.lines)
+        parts.set(line.part, round((parts.get(line.part) ?? 0) + line.qty));
+      expansion = [...parts].sort(([a], [b]) => a.localeCompare(b)).map(([part, quantity2]) => ({ part, quantity: quantity2 }));
+      bomId = active.bomId;
+    }
+    const closed = input2.cancelled || input2.refunded === input2.ordered;
+    const reversed = input2.cancelled ? input2.shipped : Math.min(input2.shipped, input2.refunded);
+    const committed = closed ? 0 : Math.max(
+      0,
+      input2.ordered - input2.shipped - Math.max(0, input2.refunded - input2.shipped)
+    );
+    if (dryRun)
+      return {
+        preview: true,
+        committed,
+        shipped: input2.shipped,
+        reversed,
+        bomId
+      };
+    const resolved = await client.query(
+      `SELECT id,vendor,vendor_part_number FROM parts ORDER BY id FOR UPDATE`
+    );
+    const ids = new Map(
+      resolved.rows.map((p) => [
+        `${p.vendor}:${p.vendor_part_number}`.toLowerCase(),
+        p.id
+      ])
+    );
+    for (const part of expansion) {
+      const id = ids.get(part.part.toLowerCase());
+      if (!id) throw new InputError("Pinned BOM part no longer exists.");
+      const provenance2 = {
+        source: "reconcile_bigcommerce",
+        ...run,
+        orderId: input2.orderId,
+        lineId: input2.lineId,
+        bomId,
+        observedAt: input2.observedAt
+      };
+      const credit = reversed - Number(prior?.reversed ?? 0);
+      if (credit > 0)
+        await appendEntry(
+          db,
+          {
+            part: parsePartRef(part.part),
+            entryType: "adjustment",
+            quantity: round(credit * part.quantity),
+            reference: JSON.stringify([
+              input2.orderId,
+              input2.lineId,
+              "refund",
+              reversed
+            ]),
+            idempotencyScope: ["bc-refund"],
+            provenance: provenance2,
+            createdBy: run.agentId
+          },
+          client
+        );
+      const consumed = input2.shipped - Number(prior?.shipped ?? 0);
+      if (consumed > 0)
+        await appendEntry(
+          db,
+          {
+            part: parsePartRef(part.part),
+            entryType: "sale",
+            quantity: round(consumed * part.quantity),
+            reference: JSON.stringify([
+              input2.orderId,
+              input2.lineId,
+              "shipped",
+              input2.shipped
+            ]),
+            idempotencyScope: ["bc-shipment"],
+            provenance: provenance2,
+            createdBy: run.agentId
+          },
+          client
+        );
+      await client.query(
+        `INSERT INTO reservations(part_id,quantity,bigcommerce_order_id,bigcommerce_line_id,status,bom_id)
+        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(bigcommerce_order_id,bigcommerce_line_id,part_id)
+        DO UPDATE SET quantity=EXCLUDED.quantity,status=EXCLUDED.status,updated_at=now()`,
+        [
+          id,
+          round((committed || input2.ordered) * part.quantity),
+          input2.orderId,
+          input2.lineId,
+          committed ? "committed" : input2.shipped > reversed ? "consumed" : "released",
+          bomId
+        ]
+      );
+    }
+    await client.query(
+      `INSERT INTO bigcommerce_lines(order_id,line_id,catalog_key,bom_id,identity,expansion,ordered,shipped,refunded,reversed,closed,observed_at,snapshot)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ON CONFLICT(order_id,line_id) DO UPDATE SET shipped=EXCLUDED.shipped,refunded=EXCLUDED.refunded,reversed=EXCLUDED.reversed,closed=EXCLUDED.closed,observed_at=EXCLUDED.observed_at,snapshot=EXCLUDED.snapshot`,
+      [
+        input2.orderId,
+        input2.lineId,
+        input2.catalogKey,
+        bomId,
+        JSON.stringify(identity),
+        JSON.stringify(expansion),
+        input2.ordered,
+        input2.shipped,
+        input2.refunded,
+        reversed,
+        closed,
+        input2.observedAt,
+        JSON.stringify(snapshot)
+      ]
+    );
+    return { committed, shipped: input2.shipped, reversed, bomId };
+  });
+}
+async function sellableInTransaction(client, key, options) {
+  const keys = key ? [key] : (await client.query(
+    "SELECT DISTINCT catalog_key FROM boms ORDER BY catalog_key"
+  )).rows.map((r) => r.catalog_key);
+  const products = [];
+  for (const catalogKey of keys) {
+    const active = await readActiveBom(client, catalogKey);
+    if (!active) throw new InputError(`No active BOM for ${catalogKey}.`);
+    let selections = [[]];
+    for (const name of new Set(
+      active.bom.optionScopes.map((s) => s.optionName)
+    )) {
+      const values2 = active.bom.optionScopes.filter(
+        (s) => s.optionName === name
+      );
+      if (selections.length * values2.length > 1e3)
+        throw new InputError(
+          "Too many BOM option combinations; query explicit options."
+        );
+      selections = selections.flatMap(
+        (s) => values2.map((v) => [...s, { option: name, value: v.optionValue }])
+      );
+    }
+    if (options) selections = [options];
+    let minimum = Number.MAX_SAFE_INTEGER;
+    for (const selection of selections) {
+      const chosen = selectLines(active.bom, selection);
+      if (chosen.missing.length || chosen.unmatched.length || chosen.conflicting.length)
+        throw new InputError("Sellable options do not match the BOM.");
+      const totals = /* @__PURE__ */ new Map();
+      for (const line of chosen.lines)
+        totals.set(
+          line.part,
+          round((totals.get(line.part) ?? 0) + line.qty)
+        );
+      for (const [ref, qty] of totals) {
+        const part = parsePartRef(ref);
+        if (part.kind !== "vendor") throw new InputError("Invalid BOM part.");
+        const stock = await client.query(
+          "SELECT available FROM part_stock WHERE vendor=$1 AND lower(vendor_part_number)=lower($2)",
+          [part.vendor, part.vendorPartNumber]
+        );
+        minimum = Math.min(
+          minimum,
+          Math.max(
+            0,
+            Math.floor(
+              Math.round(Number(stock.rows[0]?.available ?? 0) * 1e4) / Math.round(qty * 1e4)
+            )
+          )
+        );
+      }
+    }
+    products.push({
+      catalogKey,
+      quantity: minimum === Number.MAX_SAFE_INTEGER ? 0 : minimum,
+      options: options ?? []
+    });
+  }
+  return products;
+}
+async function getSellable(ctx, params2, run) {
+  const p = params2 ?? {};
+  const db = await openStore(ctx, run.companyId);
+  const { parseSelections: parseSelections2 } = await Promise.resolve().then(() => (init_sales(), sales_exports));
+  const products = await db.transaction(
+    (c) => sellableInTransaction(
+      c,
+      p.productSku,
+      p.options === void 0 ? void 0 : parseSelections2(p.options)
+    )
+  );
+  return {
+    content: `Computed sellable quantities for ${products.length} products.`,
+    data: { products }
+  };
+}
+async function pushStock(ctx, run) {
+  const db = await openStore(ctx, run.companyId);
+  const api = await bigcommerceClient(ctx, run.companyId);
+  return flushStock(db, (key, quantity2) => api.push(key, quantity2));
+}
+async function flushStock(db, push) {
+  return db.transaction(async (client) => {
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('inventory-bigcommerce-push'))"
+    );
+    const pending = (await client.query("SELECT id FROM bigcommerce_stock_dirty")).rows;
+    if (!pending.length) return { pushed: 0 };
+    const products = await sellableInTransaction(client);
+    for (const product of products)
+      await push(product.catalogKey, product.quantity);
+    await client.query(
+      "DELETE FROM bigcommerce_stock_dirty WHERE id = ANY($1::bigint[])",
+      [pending.map((r) => r.id)]
+    );
+    return { pushed: products.length };
+  });
+}
+async function reconcileBigcommerce(ctx, params2, run) {
+  const p = params2 ?? {};
+  if (p.dryRun !== void 0 && typeof p.dryRun !== "boolean")
+    throw new InputError("dryRun must be boolean.");
+  const db = await openStore(ctx, run.companyId);
+  const api = await bigcommerceClient(ctx, run.companyId);
+  const saved = await db.query(
+    "SELECT cursor FROM sync_state WHERE key='bigcommerce'"
+  );
+  const since = p.since ?? saved[0]?.cursor;
+  if (!since || !Number.isFinite(Date.parse(since)))
+    throw new InputError(
+      "First reconciliation requires an explicit ISO since timestamp; choose the inventory opening boundary."
+    );
+  const started = new Date(Date.now() - 6e4).toISOString();
+  const { snapshots, orderIds } = await api.orders(since);
+  const known = await db.query(
+    "SELECT order_id,line_id FROM bigcommerce_lines WHERE order_id=ANY($1::text[])",
+    [orderIds]
+  );
+  const observed = new Set(
+    snapshots.map((s) => JSON.stringify([s.orderId, s.lineId]))
+  );
+  if (known.some((s) => !observed.has(JSON.stringify([s.order_id, s.line_id]))))
+    throw new InputError(
+      "A previously reconciled physical order line disappeared; resolve it explicitly. Cursor unchanged."
+    );
+  const results = [];
+  for (const snapshot of snapshots)
+    results.push(await applyOrderLine(db, snapshot, run, p.dryRun === true));
+  if (p.dryRun)
+    return {
+      content: `Previewed ${results.length} order lines; nothing changed.`,
+      data: { results, dryRun: true }
+    };
+  const stock = await pushStock(ctx, run);
+  await db.transaction(async (c) => {
+    await c.query(
+      `INSERT INTO sync_state(key,cursor) VALUES('bigcommerce',$1)
+    ON CONFLICT(key) DO UPDATE SET cursor=GREATEST(sync_state.cursor,EXCLUDED.cursor),updated_at=now()`,
+      [started]
+    );
+  });
+  return {
+    content: `Reconciled ${results.length} order lines.`,
+    data: { results, ...stock, cursor: started }
+  };
+}
+
+// src/bom-sync.ts
+init_bom();
+
 // src/config-repo.ts
+init_config();
+init_constants();
+init_errors();
 var ConfigRepoError = class extends OperatorFacingError {
 };
 var REPO = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
@@ -43762,6 +44585,9 @@ async function githubConfigRepo(ctx, companyId, settings) {
 }
 
 // src/bom-sync.ts
+init_errors();
+init_parts();
+init_storage();
 var BomValidationError = class extends OperatorFacingError {
   constructor(problems) {
     super(
@@ -44012,204 +44838,18 @@ ${data.warnings.map((warning) => `  - ${warning}`).join("\n")}` : ""}`,
   };
 }
 
-// src/sales.ts
-var MAX_OPTIONS = 50;
-async function readActiveBom(client, catalogKey) {
-  const { rows } = await client.query(
-    `SELECT id, version, catalog_key, catalog_key_kind, content_hash, source_commit, option_scopes
-       FROM boms WHERE catalog_key = $1 ORDER BY version DESC LIMIT 1`,
-    [catalogKey]
-  );
-  const head = rows[0];
-  if (!head) return void 0;
-  const lines = await client.query(
-    `SELECT l.option_name, l.option_value, l.quantity_per_unit, l.customer_description,
-            l.source_line_id, p.vendor, p.vendor_part_number, l.part_id
-       FROM bom_lines l JOIN parts p ON p.id = l.part_id
-      WHERE l.bom_id = $1
-      ORDER BY l.option_name NULLS FIRST, l.option_value NULLS FIRST, p.vendor, p.vendor_part_number`,
-    [head.id]
-  );
-  return {
-    bomId: head.id,
-    version: Number(head.version),
-    catalogKey: head.catalog_key,
-    sourceCommit: head.source_commit ?? null,
-    bom: {
-      fileName: `${head.catalog_key}.yaml`,
-      catalogKey: head.catalog_key,
-      catalogKeyKind: head.catalog_key_kind,
-      status: "active",
-      lines: lines.rows.map((row) => ({
-        part: formatPartRef(row.vendor, row.vendor_part_number),
-        qty: Number(row.quantity_per_unit),
-        customerDescription: row.customer_description,
-        ...row.option_name ? { optionName: row.option_name } : {},
-        ...row.option_value ? { optionValue: row.option_value } : {},
-        ...row.source_line_id ? { sourceLineId: row.source_line_id } : {},
-        pending: []
-      })),
-      optionScopes: (head.option_scopes ?? []).filter((scope) => typeof scope.option === "string" && typeof scope.value === "string").map((scope) => ({ optionName: scope.option, optionValue: scope.value }))
-    }
-  };
-}
-function parseSelections(raw) {
-  if (raw === void 0 || raw === null) return [];
-  if (!Array.isArray(raw)) throw new InputError("options must be a list.");
-  if (raw.length > MAX_OPTIONS) throw new InputError(`An order with more than ${MAX_OPTIONS} options is not a real order.`);
-  return raw.map((entry, index) => {
-    const at = `options[${index}]`;
-    if (typeof entry === "string") {
-      const separator = entry.indexOf(":");
-      if (separator <= 0 || entry.slice(separator + 1).trim() === "") {
-        throw new InputError(
-          `${at} is "${entry}", which names an option but not the value the customer chose. Pass "option name: value", or { option, value }.`
-        );
-      }
-      return { option: entry.slice(0, separator).trim(), value: entry.slice(separator + 1).trim() };
-    }
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new InputError(`${at} must be "option name: value" or an object with option and value.`);
-    }
-    const { option, value } = entry;
-    if (typeof option !== "string" || option.trim() === "" || typeof value !== "string" || value.trim() === "") {
-      throw new InputError(`${at} must carry both an option name and the chosen value.`);
-    }
-    return { option: option.trim(), value: value.trim() };
-  });
-}
-async function expandSale(db, input2) {
-  return db.transaction(async (client) => {
-    const active = await readActiveBom(client, input2.catalogKey);
-    if (!active) {
-      throw new InputError(
-        `No BOM is active for ${input2.catalogKey}. Add the BOM file to the config repository and run sync_boms; until then a sale of this product has nothing to consume, and recording it would understate what was used.`
-      );
-    }
-    const { lines, unmatched, ignored, missing, conflicting } = selectLines(active.bom, input2.selections);
-    if (missing.length > 0 || conflicting.length > 0) {
-      throw new InputError(
-        `BOM version ${active.version} of ${active.catalogKey} requires exactly one selection for each declared option. Missing: ${missing.join(", ") || "none"}; conflicting: ${conflicting.join(", ") || "none"}. Nothing was consumed.`
-      );
-    }
-    if (unmatched.length > 0) {
-      throw new InputError(
-        `BOM version ${active.version} of ${active.catalogKey} has no answer for ${unmatched.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}. The storefront offers a value this BOM does not, which is an option renamed or added without updating the BOM. Nothing was consumed.`
-      );
-    }
-    if (lines.length === 0) {
-      throw new LedgerError(
-        `BOM version ${active.version} of ${active.catalogKey} expands to no lines for these options, so this sale would consume nothing.`
-      );
-    }
-    const consumed = [];
-    let duplicates = 0;
-    for (const line of lines) {
-      const perUnit = line.qty;
-      const quantity2 = parseQuantity(Math.round(perUnit * input2.qty * 1e4) / 1e4, {
-        label: `Consumption of ${line.part}`,
-        positive: true
-      });
-      const result = await appendEntry(
-        db,
-        {
-          part: parsePartRef(line.part),
-          entryType: "sale",
-          quantity: quantity2,
-          reference: input2.reference,
-          // The reference is the BigCommerce order id and line, so repeating it
-          // is the same sale. The part is added by `appendEntry` from the
-          // resolved row, which is what makes a retry recognisable.
-          idempotencyScope: ["sale"],
-          note: line.customerDescription,
-          provenance: {
-            source: "record_sale",
-            agentId: input2.run.agentId,
-            runId: input2.run.runId,
-            companyId: input2.run.companyId,
-            projectId: input2.run.projectId,
-            catalogKey: active.catalogKey,
-            bomId: active.bomId,
-            bomVersion: active.version,
-            bomSourceCommit: active.sourceCommit,
-            quantityPerUnit: perUnit,
-            unitsSold: input2.qty,
-            reference: input2.reference,
-            ...line.optionName ? { option: line.optionName, optionValue: line.optionValue } : {},
-            ...line.sourceLineId ? { sourceLineId: line.sourceLineId } : {}
-          },
-          createdBy: input2.run.agentId
-        },
-        client
-      );
-      if (result.duplicate) {
-        duplicates += 1;
-        if (result.entry.quantityDelta !== -quantity2) {
-          throw new InputError(
-            `Reference "${input2.reference}" already consumed ${-result.entry.quantityDelta} of ${result.part.ref}, not ${quantity2}. Nothing was changed. A sale that really did change quantity needs a new reference; a BOM that changed needs an adjustment.`
-          );
-        }
-      }
-      consumed.push({
-        partId: result.part.partId,
-        partRef: result.part.ref,
-        quantityPerUnit: perUnit,
-        quantityConsumed: quantity2,
-        ...line.optionName ? { optionName: line.optionName, optionValue: line.optionValue } : {},
-        duplicate: result.duplicate,
-        onHand: result.stock.onHand
-      });
-    }
-    if (duplicates > 0 && duplicates < consumed.length) {
-      throw new InputError(
-        `Reference "${input2.reference}" was already recorded against a different set of parts than BOM version ${active.version} expands to (${duplicates} of ${consumed.length} lines matched). Nothing was changed. Record an adjustment for the difference rather than re-recording the sale.`
-      );
-    }
-    return {
-      catalogKey: active.catalogKey,
-      bomVersion: active.version,
-      bomId: active.bomId,
-      qty: input2.qty,
-      reference: input2.reference,
-      lines: consumed,
-      ignoredOptions: [...ignored],
-      duplicate: duplicates > 0
-    };
-  });
-}
-async function recordSale(ctx, rawParams, run) {
-  if (rawParams === null || typeof rawParams !== "object" || Array.isArray(rawParams)) {
-    throw new InputError("record_sale parameters must be an object.");
-  }
-  const params2 = rawParams;
-  const catalogKey = typeof params2.productSku === "string" ? params2.productSku.trim() : "";
-  if (catalogKey === "" || catalogKey.length > 64) {
-    throw new InputError(
-      "A product is required: its BigCommerce variant SKU, or product-<id> for a product whose variants have no SKU."
-    );
-  }
-  const qty = parseQuantity(params2.qty, { label: "The sold quantity", positive: true });
-  const reference = typeof params2.reference === "string" ? params2.reference.trim() : "";
-  if (reference === "") {
-    throw new InputError(
-      "A reference is required \u2014 the BigCommerce order id and line. It is what makes recording the same sale twice harmless."
-    );
-  }
-  const selections = parseSelections(params2.options);
-  const db = await openStore(ctx, run.companyId);
-  const data = await expandSale(db, { catalogKey, qty, reference, selections, run });
-  const summary = data.lines.map((line) => `${line.partRef}: ${line.quantityConsumed} consumed, ${line.onHand} on hand`).join("\n");
-  const ignored = data.ignoredOptions.length ? `
-Options with no BOM lines behind them, so nothing was consumed for them: ${data.ignoredOptions.map((selection) => `"${selection.option}: ${selection.value}"`).join(", ")}.` : "";
-  return {
-    content: data.duplicate ? `Already recorded \u2014 reference "${data.reference}" consumed these parts before, so nothing changed.
-${summary}` : `Sale of ${data.qty} \xD7 ${data.catalogKey} consumed ${data.lines.length} part${data.lines.length === 1 ? "" : "s"} through BOM version ${data.bomVersion}.
-${summary}${ignored}`,
-    data
-  };
-}
+// src/worker.ts
+init_sales();
+
+// src/sheet-sync.ts
+init_errors();
+init_ledger();
+init_quantity();
+init_storage();
 
 // src/sheets-client.ts
+init_config();
+init_errors();
 import { createSign } from "node:crypto";
 var SheetError = class extends OperatorFacingError {
 };
@@ -44728,6 +45368,10 @@ var TOOL_DECLARATIONS = [
         productSku: {
           type: "string",
           description: "Omit to get every product with a BOM."
+        },
+        options: {
+          type: "array",
+          items: { type: "object", properties: { option: { type: "string" }, value: { type: "string" } }, required: ["option", "value"] }
         }
       }
     }
@@ -44809,9 +45453,13 @@ function toolError(ctx, toolName, companyId, error62) {
   });
   return { error: message2, content: message2, data: { error: message2 } };
 }
-var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale"];
+var IMPLEMENTED_TOOLS = ["record_receipt", "record_adjustment", "get_stock", "submit_order_email", "list_review_queue", "resolve_review_item", "sync_sheet", "sync_boms", "record_sale", "get_sellable", "reconcile_bigcommerce"];
 async function dispatch(ctx, declaration, params2, runCtx) {
   switch (declaration.name) {
+    case "get_sellable":
+      return getSellable(ctx, params2, runCtx);
+    case "reconcile_bigcommerce":
+      return reconcileBigcommerce(ctx, params2, runCtx);
     case "sync_sheet":
       return syncSheet(ctx, params2, runCtx);
     case "sync_boms":
@@ -44847,7 +45495,16 @@ var plugin = definePlugin({
         async (params2, runCtx) => {
           try {
             const result = await dispatch(ctx, declaration, params2, runCtx);
-            return { ...result, data: structured(result.data) };
+            const data = structured(result.data);
+            const mutates = ["record_receipt", "record_adjustment", "record_sale", "submit_order_email", "resolve_review_item", "sync_sheet", "sync_boms"].includes(declaration.name);
+            if (mutates && !params2?.dryRun && !result.error) {
+              try {
+                data.stockSync = await pushStock(ctx, runCtx);
+              } catch {
+                data.stockSync = { pending: true, message: "Local change saved; stock push pending. Run reconcile_bigcommerce to retry." };
+              }
+            }
+            return { ...result, data };
           } catch (error62) {
             return toolError(ctx, declaration.name, runCtx.companyId, error62);
           }
