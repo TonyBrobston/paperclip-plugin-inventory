@@ -43432,24 +43432,34 @@ function parseCounts(rows) {
   }
   return counts;
 }
-function settingsOf(row) {
-  validateInputCells(row.slice(11, 16), "Inventory human settings");
-  const cells2 = values(row);
+function inventoryCellValue(cell, rowNumber, column) {
+  try {
+    return cellValue(cell);
+  } catch (error62) {
+    if (error62 instanceof SheetError) throw new SheetError(`Inventory row ${rowNumber} ${INVENTORY_HEADERS[column]}: ${error62.message}`);
+    throw error62;
+  }
+}
+function settingsOf(row, rowNumber) {
+  const label2 = `Inventory row ${rowNumber}`;
+  validateInputCells(row.slice(11, 16), `${label2} human settings`);
+  const cells2 = row.slice(11, 16).map((cell, offset) => inventoryCellValue(cell, rowNumber, 11 + offset));
   const result = {};
   for (const [offset, name] of ["reorderPoint", "targetQty", "location", "notes", "active"].entries()) {
-    const value = cells2[11 + offset];
+    const value = cells2[offset];
+    const field2 = `${label2} ${INVENTORY_HEADERS[11 + offset]}`;
     if (value === void 0 || value === "") {
       result[name] = null;
       continue;
     }
     if (offset < 2) {
-      const qty = parseQuantity(value, { label: name });
-      if (qty < 0) throw new SheetError(`${name} cannot be negative.`);
+      const qty = parseQuantity(value, { label: field2 });
+      if (qty < 0) throw new SheetError(`${field2} cannot be negative.`);
       result[name] = qty;
     } else if (offset === 4) {
-      if (typeof value !== "boolean") throw new SheetError("Active must be a checkbox boolean.");
+      if (typeof value !== "boolean") throw new SheetError(`${field2} must be a checkbox boolean.`);
       result[name] = value;
-    } else result[name] = text3(value, name, 5e3);
+    } else result[name] = text3(value, field2, 5e3);
   }
   return result;
 }
@@ -43520,7 +43530,8 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
     const settings = /* @__PURE__ */ new Map();
     for (let i = 1; i < inventoryRows.length; i++) {
       const row = inventoryRows[i] ?? [];
-      const rawId = cellValue(row[0]);
+      row.slice(0, 11).forEach((cell, column) => inventoryCellValue(cell, i + 1, column));
+      const rawId = inventoryCellValue(row[0], i + 1, 0);
       if (rawId === void 0 || rawId === "") {
         if (populated(row.slice(0, 11))) throw new SheetError(`Inventory row ${i + 1} has system values but no Part ID. Restore its Part ID before syncing.`);
         continue;
@@ -43528,7 +43539,7 @@ async function synchronizeSheet(db, sheets, spreadsheetId, run, dryRun = false) 
       const id = text3(rawId, `Inventory row ${i + 1} Part ID`).toLowerCase();
       if (!UUID2.test(id) || rowMap.has(id)) throw new SheetError(`Inventory row ${i + 1} has an invalid or duplicate Part ID. No rows were changed.`);
       rowMap.set(id, i);
-      settings.set(id, settingsOf(row));
+      settings.set(id, settingsOf(row, i + 1));
     }
     const result = await db.transaction(async (client) => {
       const known = new Set((await client.query("SELECT id FROM parts")).rows.map((p) => p.id));
